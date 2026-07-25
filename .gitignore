@@ -1,7 +1,10 @@
 node_modules/
 dist/
 dist-types/
+dist-single/
 screenshots/
+screenshots-single/
+snowball-playtest.html
 *.tsbuildinfo
 .DS_Store
 coverage/
