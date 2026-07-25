@@ -1,0 +1,17 @@
+{
+  // NOTE: `lib` deliberately omits "DOM" and there is no `types: ["node"]`.
+  // That is not an oversight -- it is the cheapest possible guarantee that
+  // everything in this package runs unchanged in both Node and the browser.
+  // `window`, `document`, `process` and `Buffer` will not even typecheck here.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": [],
+    "rootDir": "src",
+    "outDir": "dist",
+    "noEmit": false,
+    "emitDeclarationOnly": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}
