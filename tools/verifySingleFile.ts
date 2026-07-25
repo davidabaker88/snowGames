@@ -138,6 +138,50 @@ async function main(): Promise<void> {
     await page.screenshot({ path: `${outDir}/single-05-riglab.png` });
 
     check('no runtime errors anywhere', errors.length === 0, errors.slice(0, 3).join(' | '));
+    await ctx.close();
+
+    // ---- the start card across real phone sizes ----------------------------
+    // The primary action must be reachable WITHOUT scrolling on every one of
+    // these. A start card whose button sits below the fold on a small phone is
+    // indistinguishable from a broken page to whoever opens it first.
+    const sizes = [
+      ['portrait 390x844 (iPhone 13)', { width: 390, height: 844 }],
+      ['portrait 360x640 (small Android)', { width: 360, height: 640 }],
+      ['landscape 844x390', { width: 844, height: 390 }],
+      ['landscape 667x375 (small)', { width: 667, height: 375 }],
+    ] as const;
+
+    for (const [label, viewport] of sizes) {
+      const c = await browser.newContext({
+        viewport,
+        deviceScaleFactor: 2,
+        hasTouch: true,
+        isMobile: true,
+      });
+      const p = await c.newPage();
+      const errs: string[] = [];
+      p.on('pageerror', (e) => errs.push(String(e)));
+      await p.goto(pathToFileURL(resolve(file)).href, { waitUntil: 'load' });
+      await p.waitForTimeout(650);
+
+      const btn = await p.evaluate(() => {
+        const el = document.getElementById('go');
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { top: r.top, bottom: r.bottom, vh: window.innerHeight };
+      });
+      const ok =
+        btn !== null && btn.bottom <= btn.vh + 1 && btn.top >= -1 && errs.length === 0;
+      check(
+        `start button reachable without scrolling -- ${label}`,
+        ok,
+        btn ? `bottom ${btn.bottom.toFixed(0)} of ${btn.vh}` : 'button missing',
+      );
+      await p.screenshot({
+        path: `${outDir}/single-size-${viewport.width}x${viewport.height}.png`,
+      });
+      await c.close();
+    }
   } finally {
     await browser.close();
   }
