@@ -4,8 +4,7 @@ A 3/4 top-down multiplayer snowball fight for the browser, built mobile-first.
 
 **Playable now:** move, pack a snowball by circling your thumb, throw it with a
 flick, set it down and pick it back up, knock over training dummies, and build or
-wreck snow walls. Game modes and real multiplayer are designed but not built yet —
-see [Roadmap](#roadmap).
+wreck snow walls. Single device, no server — see [Roadmap](#roadmap).
 
 ## Running it
 
@@ -182,22 +181,27 @@ Notable regression guards, each one written because the bug actually happened:
 
 ## Roadmap
 
-Designed and agreed, not yet built:
+| Phase | Work | State |
+| --- | --- | --- |
+| 4 | Snow walls: build and destroy | **done** |
+| 5 | Pluggable game-mode framework + the four game modes | next |
+| — | Networked multiplayer and a game server | **not being built** |
 
-| Phase | Work |
-| --- | --- |
-| ~~4~~ | ~~Snow walls: build and destroy~~ — **done** |
-| 5 | Pluggable game-mode framework + Team Snowball War + Last One Standing |
-| 6 | Real netcode: host-authoritative WebSocket, client prediction, snapshot interpolation |
-| 7 | Capture the Flag, King of the Hill / Fort Defense, rooms and lobby |
-| 8 | Production server, LAN + `cloudflared` tunnel, hardening |
+**No server.** That is a deliberate decision, not an omission. It means there is no
+networked multiplayer: no online play, and no same-WiFi play between devices. Each
+device runs its own game.
 
-Multiplayer will be host-authoritative over WebSocket, and can run entirely free:
-one machine hosts for same-WiFi play, or a free `cloudflared` quick tunnel exposes
-it to a friend in another city. The `Transport` interface already in `shared/net/`
-is bytes-only and assumes nothing about ordering or reliability, so adding WebRTC —
-or a native Bluetooth bridge behind a Capacitor wrapper — is a new file rather than
-a rewrite.
+What that does *not* rule out is same-device play against bots, and all four game
+modes on top of it. The groundwork is already here and tested: `step()` is a pure
+function that a host can drive, bots are designed to emit the same `InputFrame`
+structs a human does, and `shared/net/localTransport.ts` already carries messages
+in-process with configurable latency and loss. So modes are buildable without a
+line of server code.
+
+If networking is ever wanted, nothing here blocks it. `Transport` is bytes-only and
+assumes nothing about ordering or reliability, so a WebSocket server — or WebRTC, or
+a native Bluetooth bridge behind a Capacitor wrapper — would be a new file rather
+than a rewrite.
 
 Cats and other creatures are a data file each: add a skin, add one line to the skin
 registry.
