@@ -31,12 +31,22 @@ import {
   THROW_MIN_SPEED,
   THROW_RELEASE_HEIGHT,
   TICK_DT,
+  TILE_SIZE,
+  WALL_DAMAGE_BASE,
   Y_SQUASH,
 } from '../constants.js';
 import { clamp01, invLerp, lerp } from '../math/angle.js';
 import { makeSweepResult, sweptCircleHit } from './collision.js';
 import { ActionState, BallSize, BallState, SimEventType } from './types.js';
 import { freeBall, pushEvent, type Ball, type Player, type World } from './world.js';
+import {
+  damageWall,
+  makeWallDamageResult,
+  tileAtWorld,
+  tileCenterX,
+  tileCenterY,
+  wallHeightAt,
+} from './walls.js';
 
 export function ballRadius(size: BallSize): number {
   return size === BallSize.Small
@@ -99,6 +109,7 @@ export function placeBallAt(w: World, b: Ball, p: Player): void {
 }
 
 const sweep = makeSweepResult();
+const wallDamage = makeWallDamageResult();
 
 export function stepBalls(w: World): void {
   for (const b of w.balls) {
@@ -139,10 +150,20 @@ function stepGroundedBall(w: World, b: Ball): void {
   }
 }
 
+/**
+ * Advance one ball through one tick, in SUBSTEPS.
+ *
+ * Substepping is not optional here. A max-power ball covers ~30 units per tick
+ * against a 32-unit wall tile and a 17-unit player radius, so a single test per
+ * tick misses a wall roughly as often as it hits one -- and "my snowball went
+ * through the fort" is the kind of bug that makes a mechanic feel fake.
+ *
+ * The substep length is capped by the smallest thing worth not missing.
+ */
 function stepFlightBall(w: World, b: Ball): void {
   const r = ballRadius(b.size);
 
-  // Integrate with drag.
+  // Integrate velocity once for the whole tick; only position is substepped.
   const drag = 1 - AIR_DRAG * TICK_DT;
   b.vx *= drag;
   b.vy *= drag;
@@ -154,75 +175,117 @@ function stepFlightBall(w: World, b: Ball): void {
 
   b.spin += Math.sqrt(dx * dx + dy * dy) * 0.05;
 
-  // ---- swept player collision ------------------------------------------------
-  // Swept, not point-in-circle: a fast ball covers more ground per tick than a
-  // player is wide, so a naive test tunnels through people.
+  const travel = Math.sqrt(dx * dx + dy * dy);
+  const maxStep = Math.min(r, TILE_SIZE / 2);
+  const steps = Math.max(1, Math.ceil(travel / maxStep));
+  const inv = 1 / steps;
+
   const immune = w.tick - b.stateTick < OWNER_IMMUNE_TICKS;
-  let hitPlayer: Player | null = null;
-  let hitT = 1;
 
-  for (const p of w.players) {
-    if (!p.active || !p.alive) continue;
-    if (p.id === b.owner && immune) continue;
+  for (let s = 0; s < steps; s++) {
+    const sx = dx * inv;
+    const sy = dy * inv;
+    const sz = dz * inv;
 
-    // Vertical gate: the ball must be within the player's body height band at
-    // the moment of contact, otherwise it sails overhead.
-    const zAt = b.z + dz * 0.5;
-    if (zAt > PLAYER_HEIGHT + r || zAt < -r) continue;
+    // ---- swept player collision over this substep ---------------------------
+    let hitPlayer: Player | null = null;
+    let hitT = 1;
 
-    const pdx = p.vx * TICK_DT;
-    const pdy = p.vy * TICK_DT;
-    sweptCircleHit(b.x, b.y, dx, dy, r, p.x, p.y, pdx, pdy, PLAYER_RADIUS, sweep);
-    if (sweep.hit && sweep.t < hitT) {
-      hitT = sweep.t;
-      hitPlayer = p;
+    for (const p of w.players) {
+      if (!p.active || !p.alive) continue;
+      if (p.id === b.owner && immune) continue;
+
+      // Vertical gate: the ball must be inside the body height band, else it
+      // sails overhead.
+      const zAt = b.z + sz * 0.5;
+      if (zAt > PLAYER_HEIGHT + r || zAt < -r) continue;
+
+      const pdx = p.vx * TICK_DT * inv;
+      const pdy = p.vy * TICK_DT * inv;
+      sweptCircleHit(b.x, b.y, sx, sy, r, p.x, p.y, pdx, pdy, PLAYER_RADIUS, sweep);
+      if (sweep.hit && sweep.t < hitT) {
+        hitT = sweep.t;
+        hitPlayer = p;
+      }
     }
-  }
 
-  if (hitPlayer) {
-    const ix = b.x + dx * hitT;
-    const iy = b.y + dy * hitT;
-    const iz = b.z + dz * hitT;
-    applyHit(w, b, hitPlayer, ix, iy, iz);
-    return;
-  }
+    if (hitPlayer) {
+      applyHit(w, b, hitPlayer, b.x + sx * hitT, b.y + sy * hitT, b.z + sz * hitT);
+      return;
+    }
 
-  // ---- integrate -------------------------------------------------------------
-  b.x += dx;
-  b.y += dy;
-  b.z += dz;
+    b.x += sx;
+    b.y += sy;
+    b.z += sz;
 
-  // ---- prop collision (blocks at height) -------------------------------------
-  for (const prop of w.props) {
-    if (prop.radius <= 0) continue;
-    if (b.z > prop.height) continue;
-    const pdx = b.x - prop.x;
-    const pdy = b.y - prop.y;
-    const rr = prop.radius + r;
-    if (pdx * pdx + pdy * pdy <= rr * rr) {
+    // ---- walls -------------------------------------------------------------
+    // The ENTIRE "throw over a low wall" feature is this height comparison.
+    // No special case, no separate low-wall type: a ball clears a wall exactly
+    // when it is flying higher than that wall currently stands.
+    const tile = tileAtWorld(w.walls, b.x, b.y);
+    if (tile >= 0 && w.walls.tier[tile]! > 0 && b.z < wallHeightAt(w.walls, tile)) {
       const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
-      pushEvent(w, SimEventType.WallHit, b.id, b.x, b.y, b.z, speed);
+      const scale = 0.55 + 0.45 * invLerp(IMPACT_SPEED_MIN, IMPACT_SPEED_MAX, speed);
+      const damage =
+        WALL_DAMAGE_BASE * scale * (ballBaseDamage(b.size) / BALL_DAMAGE_NORMAL);
+
+      damageWall(w.walls, tile, damage, wallDamage);
+      pushEvent(w, SimEventType.WallHit, tile, b.x, b.y, b.z, speed, b.owner);
+      if (wallDamage.destroyed) {
+        pushEvent(
+          w,
+          SimEventType.WallDestroyed,
+          tile,
+          tileCenterX(w.walls, tile),
+          tileCenterY(w.walls, tile),
+          0,
+          wallDamage.heightBefore,
+          b.owner,
+        );
+      }
       freeBall(w, b);
       return;
     }
-  }
 
-  // ---- ground ----------------------------------------------------------------
-  if (b.z <= 0) {
-    b.z = 0;
-    const impact = Math.abs(b.vz);
-    if (impact > 220) {
-      // One visible bounce, then settle. Reads as a real snowball skidding.
-      b.vz = impact * BALL_BOUNCE_DAMPING;
-      b.vx *= 0.7;
-      b.vy *= 0.7;
-      pushEvent(w, SimEventType.Bounced, b.id, b.x, b.y, 0, impact);
-    } else {
-      b.vz = 0;
-      b.state = BallState.Grounded;
-      b.stateTick = w.tick;
-      b.vx *= 0.4;
-      b.vy *= 0.4;
+    // ---- props -------------------------------------------------------------
+    let hitProp = false;
+    for (const prop of w.props) {
+      if (prop.radius <= 0) continue;
+      if (b.z > prop.height) continue;
+      const pdx = b.x - prop.x;
+      const pdy = b.y - prop.y;
+      const rr = prop.radius + r;
+      if (pdx * pdx + pdy * pdy <= rr * rr) {
+        hitProp = true;
+        break;
+      }
+    }
+    if (hitProp) {
+      const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
+      pushEvent(w, SimEventType.WallHit, -1, b.x, b.y, b.z, speed, b.owner);
+      freeBall(w, b);
+      return;
+    }
+
+    // ---- ground ------------------------------------------------------------
+    if (b.z <= 0) {
+      b.z = 0;
+      const impact = Math.abs(b.vz);
+      if (impact > 220) {
+        // One visible bounce, then settle. Reads as a snowball skidding.
+        b.vz = impact * BALL_BOUNCE_DAMPING;
+        b.vx *= 0.7;
+        b.vy *= 0.7;
+        pushEvent(w, SimEventType.Bounced, b.id, b.x, b.y, 0, impact);
+      } else {
+        b.vz = 0;
+        b.state = BallState.Grounded;
+        b.stateTick = w.tick;
+        b.vx *= 0.4;
+        b.vy *= 0.4;
+      }
+      clampBallToBounds(w, b);
+      return;
     }
   }
 

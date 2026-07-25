@@ -152,6 +152,18 @@ ${css}
   line-height: 1.5;
 }
 
+/* Portrait on a smaller phone: still one column, but the content no longer fits
+   at full rhythm. Tighten rather than let the card scroll and hide the button. */
+@media (max-height: 720px) and (max-width: 619px) {
+  .card { padding: 16px 18px 14px; }
+  .card h1 { font-size: 25px; }
+  .lede { margin-bottom: 11px; font-size: 13px; }
+  .moves { gap: 8px; margin-bottom: 11px; font-size: 13px; }
+  .moves li { grid-template-columns: 64px 1fr; gap: 10px; }
+  .rotate { margin-bottom: 11px; padding: 8px 10px; font-size: 12px; }
+  .go { padding: 11px; }
+}
+
 /* Tighten the vertical rhythm on genuinely short screens rather than letting the
    card scroll. */
 @media (max-height: 430px) {
@@ -270,7 +282,7 @@ button {
         <h1>Snowball Fight</h1>
         <p class="lede">
           Your left thumb moves. Your right thumb does everything else.
-          There are three training dummies to knock over.
+          Three training dummies to knock over, and snow walls to build and wreck.
         </p>
       </div>
 
@@ -279,6 +291,7 @@ button {
         <li><b>Flick</b><span>Throw it. <em>Direction and power both come from the flick.</em></span></li>
         <li><b>Tap</b><span>Pick up a snowball you are standing next to.</span></li>
         <li><b>Hold</b><span>Set the one you are carrying down. <em>Double-tap works too.</em></span></li>
+        <li><b>Build</b><span>Tap the brick button at the bottom to pack your snowball into a wall. <em>Snowballs chip walls back down.</em></span></li>
       </ul>
 
       <p class="rotate">

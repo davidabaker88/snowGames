@@ -14,6 +14,7 @@ export * from './input/inputFrame.js';
 export * from './sim/types.js';
 export * from './sim/world.js';
 export * from './sim/collision.js';
+export * from './sim/walls.js';
 export * from './sim/snowball.js';
 export * from './sim/player.js';
 export * from './sim/step.js';

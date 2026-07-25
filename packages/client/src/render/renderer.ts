@@ -45,6 +45,13 @@ import {
 } from './projection.js';
 import { fadeDecals, stampFootprint, type Terrain } from './terrain.js';
 import { drawAimPreview } from './aimPreview.js';
+import {
+  collectWallTiles,
+  drawBuildGhost,
+  drawWallTile,
+  wallSortKey,
+  type WallTileDraw,
+} from './wallRenderer.js';
 import type { ParticleSystem } from './particles.js';
 
 interface SkinRuntime {
@@ -68,6 +75,8 @@ export interface RenderOpts {
   showAim: boolean;
   aimAngle: number;
   aimPower: number;
+  /** Tile index the local player would build on, or -1. */
+  buildTarget: number;
   debug: boolean;
 }
 
@@ -77,6 +86,7 @@ export class Renderer {
   private list = new DrawList();
   private skins = new Map<string, SkinRuntime>();
   private lastFootprint = new Map<number, number>();
+  private wallTiles: WallTileDraw[] = [];
 
   private runtimeFor(skinId: string): SkinRuntime {
     let rt = this.skins.get(skinId);
@@ -138,6 +148,15 @@ export class Renderer {
       // is occluded by scenery in front of it, not by scenery it is above.
       this.list.push(DrawKind.Ball, b.id, b.y);
     }
+
+    // Walls go in the SAME list as everyone else. Drawing them as a separate pass
+    // would mean every player draws either always in front of or always behind
+    // every wall, and hiding behind cover is the entire point of cover.
+    collectWallTiles(w.walls, cam, vp, this.wallTiles);
+    for (let i = 0; i < this.wallTiles.length; i++) {
+      this.list.push(DrawKind.Wall, i, wallSortKey(w.walls, this.wallTiles[i]!.index));
+    }
+
     this.list.sort();
 
     this.list.forEach((d) => {
@@ -151,6 +170,11 @@ export class Renderer {
         case DrawKind.Ball:
           this.drawBall(ctx, o, w.balls[d.ref]!);
           break;
+        case DrawKind.Wall: {
+          const t = this.wallTiles[d.ref]!;
+          drawWallTile(ctx, w.walls, t.index, t.height, cam, vp);
+          break;
+        }
         default:
           break;
       }
@@ -158,6 +182,10 @@ export class Renderer {
 
     // ---- overlays ----------------------------------------------------------
     o.particles.draw(ctx, cam, vp);
+
+    if (o.buildTarget >= 0) {
+      drawBuildGhost(ctx, w.walls, o.buildTarget, cam, vp, o.showAim);
+    }
 
     if (o.showAim) {
       const me = w.players[o.localPlayerId];

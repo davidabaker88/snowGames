@@ -25,6 +25,7 @@ import {
   type JoystickState,
 } from './joystick.js';
 import { GestureRecognizer, type RecognizerContext } from './gestureRecognizer.js';
+import { hitBuildButton } from '../hud/hud.js';
 import {
   attachKeyboard,
   consumeEdges,
@@ -62,6 +63,12 @@ export class InputController {
   /** True when the local player wants an aim preview drawn. */
   lastFlickPower = 0;
 
+  /** Set by the game each frame so the button's hit test matches what is drawn. */
+  buildButtonVisible = false;
+  bottomInset = 0;
+  /** Latched on tap, consumed by the next frame. */
+  private buildQueued = false;
+
   constructor(private readonly canvas: HTMLCanvasElement) {
     this.gestures = new GestureRecognizer(390);
   }
@@ -78,6 +85,24 @@ export class InputController {
 
     const onDown = (e: PointerEvent): void => {
       e.preventDefault();
+      // The build button is hit-tested BEFORE routing to the joystick or the
+      // gesture recognizer, so it can live inside either thumb's half without
+      // that half swallowing the tap.
+      {
+        const { x: bx, y: by } = this.local(e);
+        if (
+          this.buildButtonVisible &&
+          hitBuildButton(
+            { width: this.canvas.clientWidth, height: this.canvas.clientHeight },
+            this.bottomInset,
+            bx,
+            by,
+          )
+        ) {
+          this.buildQueued = true;
+          return;
+        }
+      }
       // Capture keeps a gesture alive if the finger slides off the canvas, but it
       // throws for a pointer the browser does not consider active -- which
       // happens for synthetic events, and in odd real states too. It must never
@@ -211,7 +236,10 @@ export class InputController {
 
     if (g.place || this.keyboard.placePressed) f.buttons |= Button.Place;
     if (g.tap || this.keyboard.pickupPressed) f.buttons |= Button.Pickup;
-    if (this.keyboard.buildPressed) f.buttons |= Button.Build;
+    if (this.buildQueued || this.keyboard.buildPressed) {
+      f.buttons |= Button.Build;
+      this.buildQueued = false;
+    }
 
     consumeEdges(this.keyboard);
     this.pendingThrowPower = 0;

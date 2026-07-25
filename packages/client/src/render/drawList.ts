@@ -17,7 +17,7 @@ export const enum DrawKind {
   Prop = 0,
   Player = 1,
   Ball = 2,
-  Shadow = 3,
+  Wall = 3,
 }
 
 export interface Drawable {

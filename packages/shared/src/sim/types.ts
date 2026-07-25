@@ -59,6 +59,8 @@ export const enum SimEventType {
   Eliminated = 6,
   Melted = 7,
   Bounced = 8,
+  WallBuilt = 9,
+  WallDestroyed = 10,
 }
 
 /**

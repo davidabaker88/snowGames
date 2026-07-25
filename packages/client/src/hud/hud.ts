@@ -33,11 +33,83 @@ export interface HudModel {
   hint: string;
   /** Space reserved at the bottom of the screen, e.g. by the debug overlay. */
   bottomInset: number;
+  /** True when a wall could be built right now, so the button is live. */
+  canBuild: boolean;
+}
+
+/**
+ * The build button.
+ *
+ * Building gets a button rather than a gesture, deliberately. The right thumb
+ * already carries five distinct gestures, and the brief specified all five --
+ * overloading one of them to also mean "build" would make a control the player
+ * asked for less predictable in order to fit in one they did not.
+ *
+ * Bottom centre: reachable by either thumb in landscape, and clear of the
+ * joystick's left half and the gesture surface's right half.
+ */
+export function buildButtonRect(vp: Viewport, bottomInset: number): {
+  x: number;
+  y: number;
+  r: number;
+} {
+  const r = Math.max(26, Math.min(38, Math.min(vp.width, vp.height) * 0.072));
+  return {
+    x: vp.width * 0.5,
+    y: vp.height - r - 14 - bottomInset - cssPx('--sab'),
+    r,
+  };
+}
+
+export function hitBuildButton(
+  vp: Viewport,
+  bottomInset: number,
+  x: number,
+  y: number,
+): boolean {
+  const b = buildButtonRect(vp, bottomInset);
+  const dx = x - b.x;
+  const dy = y - b.y;
+  // A slightly generous radius: a thumb is bigger than the icon it is aiming at.
+  const r = b.r * 1.25;
+  return dx * dx + dy * dy <= r * r;
+}
+
+function drawBuildButton(ctx: CanvasRenderingContext2D, m: HudModel): void {
+  // Only shown while holding a snowball, since building spends one. A button that
+  // is visible but inert most of the time teaches the player to ignore it.
+  if (!m.holdingBall) return;
+
+  const b = buildButtonRect(m.vp, m.bottomInset);
+  const live = m.canBuild;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+  ctx.fillStyle = live ? 'rgba(23,41,61,0.82)' : 'rgba(23,41,61,0.45)';
+  ctx.fill();
+  ctx.strokeStyle = live ? 'rgba(255,255,255,0.8)' : 'rgba(255,255,255,0.28)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // A little stack of snow bricks.
+  const s = b.r * 0.52;
+  ctx.fillStyle = live ? '#ffffff' : 'rgba(255,255,255,0.4)';
+  const brickH = s * 0.42;
+  for (let row = 0; row < 2; row++) {
+    const y = b.y + s * 0.34 - row * (brickH + 2.5);
+    const offset = row === 1 ? s * 0.28 : 0;
+    ctx.fillRect(b.x - s + offset, y - brickH, s * 0.9, brickH);
+    ctx.fillRect(b.x + offset * 0.2, y - brickH, s * 0.9, brickH);
+  }
+
+  ctx.restore();
 }
 
 export function drawHud(ctx: CanvasRenderingContext2D, m: HudModel): void {
   drawJoystick(ctx, m);
   drawPackRing(ctx, m);
+  drawBuildButton(ctx, m);
   drawStatus(ctx, m);
   if (m.hint) drawHint(ctx, m);
   // Only nag in portrait, and not while a hint is already occupying that spot.

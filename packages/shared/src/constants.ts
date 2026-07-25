@@ -151,13 +151,49 @@ export const PACK_DECAY_PER_SEC = 0.6;
 export const PICKUP_RADIUS = 34;
 
 // ---------------------------------------------------------------------------
-// Walls (grid is built in phase 4; heights are referenced by the arc maths now)
+// Walls
 // ---------------------------------------------------------------------------
 
 export const TILE_SIZE = 32;
 export const WALL_HEIGHT_LOW = 20;
 export const WALL_HEIGHT_FULL = 48;
 export const WALL_HEIGHT_REINFORCED = 56;
+
+/** Height and HP by tier, indexed by WallTier (0 = none). */
+export const TIER_HEIGHT = [0, WALL_HEIGHT_LOW, WALL_HEIGHT_FULL, WALL_HEIGHT_REINFORCED];
+export const TIER_MAX_HP = [0, 40, 100, 180];
+
+/**
+ * A wall at 0 HP is gone, but a wall at 1 HP is not 1% of a wall -- it is a
+ * knee-high lump. Height therefore interpolates from 35% to 100% of the tier's
+ * full height rather than from zero, so a battered wall stays visible cover while
+ * clearly being nearly finished.
+ */
+export const WALL_MIN_HEIGHT_FRAC = 0.35;
+
+/**
+ * HP added per snowball packed into a wall. With the tier table above this gives
+ * a legible progression: one ball is a low wall, two is full height, and three to
+ * five reinforce it into ice.
+ */
+export const BUILD_HP_PER_BALL = 40;
+
+/**
+ * How far in front of the player the build target sits.
+ *
+ * Must be large enough that the target tile never overlaps the builder's own
+ * body, or building silently fails about half the time: the tile occupancy check
+ * rejects tiles containing a player, and a 34-unit-wide body standing near a
+ * tile edge overlaps the tile in front of it. The bound is
+ * `reach >= TILE_SIZE + PLAYER_RADIUS`, hence 52 rather than something snugger.
+ */
+export const BUILD_REACH = 52;
+
+/** Tick within BUILD_TICKS at which the snowball becomes wall. */
+export const BUILD_TRANSFER_TICK = 14;
+
+/** Damage a normal snowball does to a wall at reference impact speed. */
+export const WALL_DAMAGE_BASE = 15;
 
 // ---------------------------------------------------------------------------
 // Action durations (ticks). The animator stretches clips to match these.

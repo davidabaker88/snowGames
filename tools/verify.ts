@@ -39,6 +39,10 @@ interface Probe {
   cam: { x: number; y: number; zoom: number };
   vp: { width: number; height: number };
   dummies: { x: number; y: number; hp: number }[];
+  wallCount: number;
+  buildTarget: number;
+  /** Height of the tile the player is aiming at, so shrink can be observed. */
+  targetHeight: number;
 }
 
 declare global {
@@ -66,6 +70,13 @@ async function installProbe(page: Page): Promise<void> {
       const vp = g['vp'] as { width: number; height: number };
       const me = world.players[0] as Record<string, number | string>;
       const alive = world.balls.filter((b) => b['alive']);
+      // Wall figures come from the game's own debug surface rather than being
+      // re-derived here, so the test cannot quietly agree with itself.
+      const ds = (
+        g as unknown as {
+          debugState(): { wallCount: number; buildTarget: number; targetHeight: number };
+        }
+      ).debugState();
       return {
         tick: world.tick,
         action: me['action'] as number,
@@ -89,6 +100,9 @@ async function installProbe(page: Page): Promise<void> {
         dummies: world.players
           .filter((p) => p['active'] && p['isDummy'])
           .map((p) => ({ x: p['x'] as number, y: p['y'] as number, hp: p['hp'] as number })),
+        wallCount: ds.wallCount,
+        buildTarget: ds.buildTarget,
+        targetHeight: ds.targetHeight,
       };
     };
   });
@@ -268,6 +282,188 @@ async function run(): Promise<void> {
       `hp ${JSON.stringify(hpBefore)} -> ${JSON.stringify(p.dummyHp)}`,
     );
     await page.screenshot({ path: `${OUT}/07-combat.png` });
+
+    console.log('\n=== Snow walls ===');
+    // On a FRESH page, deliberately. The wall assertions depend on precise
+    // geometry -- where the player stands relative to one specific wall -- and the
+    // earlier tests leave the player somewhere arbitrary, possibly having built a
+    // wall of their own right in the firing line. Isolating is cheaper than making
+    // every assertion position-independent.
+    const wallCtx = await browser.newContext({
+      viewport: { width: 844, height: 390 },
+      deviceScaleFactor: 2,
+      hasTouch: true,
+      isMobile: true,
+    });
+    const wallPage = await wallCtx.newPage();
+    const wallErrors: string[] = [];
+    wallPage.on('pageerror', (e) => wallErrors.push(String(e)));
+    await wallPage.goto(`${base}/?debug`, { waitUntil: 'networkidle' });
+    await wallPage.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
+    await installProbe(wallPage);
+    await wallPage.waitForTimeout(600);
+
+    let wp = await probe(wallPage);
+    check('the map starts with pre-built walls', wp.wallCount > 0, `${wp.wallCount} tiles`);
+
+    /** Total standing wall height across the arena, straight from the game. */
+    const totalWallHeight = async (): Promise<number> =>
+      wallPage.evaluate(() =>
+        (
+          window as unknown as { __snowGame: { wallHeightTotal(): number } }
+        ).__snowGame.wallHeightTotal(),
+      );
+
+    /** Height of the wall tile at a world position, straight from the game. */
+    const heightAt = async (x: number, y: number): Promise<number> =>
+      wallPage.evaluate(
+        ([a, b]) =>
+          (
+            window as unknown as { __snowGame: { wallHeightNear(p: number, q: number): number } }
+          ).__snowGame.wallHeightNear(a as number, b as number),
+        [x, y],
+      );
+
+    /** Walk to a world position using the joystick, then stop. */
+    const walkTo = async (tx: number, ty: number, tolerance = 34): Promise<boolean> => {
+      for (let i = 0; i < 18; i++) {
+        const s = await probe(wallPage);
+        if (Math.hypot(tx - s.x, ty - s.y) <= tolerance) return true;
+        const dx = tx - s.x;
+        const dy = ty - s.y;
+        // Movement input is screen-relative, so compress the world y component.
+        const m = Math.hypot(dx, dy * Y_SQUASH) || 1;
+        await wallPage.evaluate(
+          ([a, b]) => window.__snowInput.move({ dx: a as number, dy: b as number, ms: 360 }),
+          [dx / m, (dy * Y_SQUASH) / m],
+        );
+        await wallPage.waitForTimeout(70);
+      }
+      return false;
+    };
+
+    /** Pack a snowball by circling, returning true once one is in hand. */
+    const packBall = async (): Promise<boolean> => {
+      for (let i = 0; i < 3; i++) {
+        if ((await probe(wallPage)).heldBall >= 0) return true;
+        await wallPage.evaluate(() => window.__snowInput.circle({ turns: 4, radius: 44, ms: 1200 }));
+        await wallPage.waitForTimeout(220);
+      }
+      return (await probe(wallPage)).heldBall >= 0;
+    };
+
+    // ---- destroy -----------------------------------------------------------
+    // Target the full-height wall below the spawn.
+    //
+    // Range matters, and not monotonically: a ball leaves the hand at height 40,
+    // arcs ABOVE the wall's 48, and comes back down, so there is a mid-range band
+    // where a throw sails clean over the wall, with connecting zones at point
+    // blank and beyond. That is the mechanic working, not a bug.
+    //
+    // So rather than encode one magic standoff -- which is fragile, and broke
+    // twice while tuning -- try successive distances until one connects. That is
+    // what a player does, and it survives future changes to the throw arc.
+    const wallX = 224;
+    const wallY = 630;
+
+    const totalBefore = await totalWallHeight();
+    const wallBefore = await heightAt(wallX, wallY);
+    check('the target wall has a height to lose', wallBefore > 0, `${wallBefore.toFixed(1)} units`);
+
+    let shrunk = false;
+    let reached = false;
+    for (const standoff of [170, 130, 210, 95, 250]) {
+      if (shrunk) break;
+      const arrived = await walkTo(wallX, wallY - standoff, 22);
+      reached = reached || arrived;
+      if (!arrived) continue;
+
+      for (let shot = 0; shot < 3 && !shrunk; shot++) {
+        if (!(await packBall())) break;
+        await walkTo(wallX, wallY - standoff, 26);
+
+        const s = await probe(wallPage);
+        const aim = {
+          x: (wallX - s.cam.x) * s.cam.zoom + s.vp.width / 2,
+          y: (wallY * Y_SQUASH - s.cam.y * Y_SQUASH) * s.cam.zoom + s.vp.height / 2,
+        };
+        await wallPage.mouse.move(aim.x, aim.y);
+        await wallPage.waitForTimeout(70);
+        // Shortest possible press, for the flattest arc.
+        await wallPage.evaluate(() => window.__snowInput.key('Space', 10));
+        await wallPage.waitForTimeout(1000);
+
+        // Measured across the WHOLE wall, because the aim drifts by a tile or two
+        // and the throw legitimately lands on a neighbouring tile of the same wall.
+        const now = await totalWallHeight();
+        if (process.env['VERBOSE']) {
+          console.log(
+            `      standoff ${standoff} shot ${shot}: at y=${s.y.toFixed(0)} total ${now.toFixed(1)}`,
+          );
+        }
+        if (now < totalBefore - 0.5) shrunk = true;
+      }
+    }
+
+    check('walked to a throwing standoff', reached);
+    const totalAfter = await totalWallHeight();
+    check(
+      'snowballs chip walls down, shrinking them',
+      shrunk,
+      `total height ${totalBefore.toFixed(1)} -> ${totalAfter.toFixed(1)} units`,
+    );
+    await wallPage.screenshot({ path: `${OUT}/15-wall-damaged.png` });
+
+    // ---- build -------------------------------------------------------------
+    // The map ships with walls, so a RISING count is what proves building works
+    // rather than merely proving walls exist.
+    const buildTotalBefore = await totalWallHeight();
+    const wallCountBefore = (await probe(wallPage)).wallCount;
+    let built = false;
+    for (let i = 0; i < 12 && !built; i++) {
+      if (!(await packBall())) continue;
+
+      // Aim by moving the MOUSE, not by nudging the stick. Once a mouse has moved,
+      // aim follows the cursor, so joystick nudges change where the player stands
+      // but not where they are pointing -- which made this loop flaky.
+      let s = await probe(wallPage);
+      const aimAt = {
+        x: (500 - s.cam.x) * s.cam.zoom + s.vp.width / 2,
+        y: (400 * Y_SQUASH - s.cam.y * Y_SQUASH) * s.cam.zoom + s.vp.height / 2,
+      };
+      await wallPage.mouse.move(aimAt.x, aimAt.y);
+      await wallPage.waitForTimeout(90);
+
+      s = await probe(wallPage);
+      if (s.buildTarget < 0) {
+        // Aiming at open ground still gave nothing buildable; shift position.
+        await wallPage.evaluate(() => window.__snowInput.move({ dx: 0.5, dy: -0.85, ms: 240 }));
+        await wallPage.waitForTimeout(120);
+        continue;
+      }
+      await wallPage.evaluate(() => window.__snowInput.key('KeyB', 60));
+      await wallPage.waitForTimeout(1200);
+      const post = await probe(wallPage);
+      if (process.env['VERBOSE'])
+        console.log(
+          `      build try ${i}: target=${s.buildTarget} action=${s.action} held=${s.heldBall} -> action=${post.action} held=${post.heldBall} walls=${post.wallCount}`,
+        );
+      // Total height rather than tile count: building onto an existing wall
+      // reinforces it and raises no count at all.
+      if ((await totalWallHeight()) > buildTotalBefore + 0.5) built = true;
+    }
+
+    wp = await probe(wallPage);
+    const buildTotalAfter = await totalWallHeight();
+    check(
+      'building adds wall',
+      built,
+      `total height ${buildTotalBefore.toFixed(1)} -> ${buildTotalAfter.toFixed(1)} units, ${wallCountBefore} -> ${wp.wallCount} tiles`,
+    );
+    check('building consumed the snowball', wp.heldBall < 0, `heldBall=${wp.heldBall}`);
+    check('walls produced no runtime errors', wallErrors.length === 0, wallErrors.slice(0, 2).join(' | '));
+    await wallPage.screenshot({ path: `${OUT}/16-wall-built.png` });
+    await wallCtx.close();
 
     console.log('\n=== The swappable-skin promise ===');
     await page.evaluate(() => window.__snowInput.key('KeyK', 60));

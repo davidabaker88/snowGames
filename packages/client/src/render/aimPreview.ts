@@ -22,6 +22,8 @@ import {
   Y_SQUASH,
   clamp01,
   lerp,
+  tileAtWorld,
+  wallHeightAt,
   type Player,
   type World,
 } from '@snow/shared';
@@ -74,19 +76,28 @@ export function drawAimPreview(
       break;
     }
 
-    // Same height test the simulation uses for props.
+    // The same height test the simulation uses, for walls and props alike. It has
+    // to be the same test or the preview becomes a lie: a dotted line that sails
+    // over a wall the real throw smacks into is worse than no preview.
+    const tile = tileAtWorld(w.walls, x, y);
+    const blockedByWall =
+      tile >= 0 && w.walls.tier[tile]! > 0 && z < wallHeightAt(w.walls, tile);
+
     let hitProp = false;
-    for (const prop of w.props) {
-      if (prop.radius <= 0 || z > prop.height) continue;
-      const dx = x - prop.x;
-      const dy = y - prop.y;
-      const rr = prop.radius + 7;
-      if (dx * dx + dy * dy <= rr * rr) {
-        hitProp = true;
-        break;
+    if (!blockedByWall) {
+      for (const prop of w.props) {
+        if (prop.radius <= 0 || z > prop.height) continue;
+        const dx = x - prop.x;
+        const dy = y - prop.y;
+        const rr = prop.radius + 7;
+        if (dx * dx + dy * dy <= rr * rr) {
+          hitProp = true;
+          break;
+        }
       }
     }
-    if (hitProp) {
+
+    if (blockedByWall || hitProp) {
       blocked = true;
       blockedX = worldToScreenX(x, cam, vp);
       blockedY = worldToScreenY(y, z, cam, vp);

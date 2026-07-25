@@ -9,8 +9,15 @@
 
 import {
   ACCEL,
+  BUILD_HP_PER_BALL,
+  BUILD_REACH,
   BUILD_SPEED_MUL,
+  BUILD_TICKS,
+  BUILD_TRANSFER_TICK,
   CARRY_SPEED_MUL,
+  TIER_MAX_HP,
+  TILE_SIZE,
+  Y_SQUASH,
   FRICTION,
   MOVE_Y_BIAS,
   PACKING_SPEED_MUL,
@@ -38,8 +45,20 @@ import { resolveCircleOverlap } from './collision.js';
 import { ActionState, BallState, SimEventType, type EntityId } from './types.js';
 import { allocBall, freeBall, pushEvent, type Player, type World } from './world.js';
 import { launchBall, placeBallAt } from './snowball.js';
+import {
+  buildAt,
+  makeCircleResolve,
+  resolveCircleAgainstWalls,
+  tileAtWorld,
+  tileCenterX,
+  tileCenterY,
+  tileMinX,
+  tileMinY,
+  WallTier,
+} from './walls.js';
 
 const scratch = { x: 0, y: 0 };
+const wallResolve = makeCircleResolve();
 
 /** True when the action fully occupies the character and cannot be interrupted. */
 function isBusy(a: ActionState): boolean {
@@ -63,11 +82,48 @@ function actionDuration(a: ActionState): number {
       return PLACE_TICKS;
     case ActionState.PickingUp:
       return PICKUP_TICKS;
+    case ActionState.Building:
+      return BUILD_TICKS;
     case ActionState.Stagger:
       return STAGGER_TICKS;
     default:
       return 0;
   }
+}
+
+/**
+ * The tile this player would build on: one reach-length ahead, along the aim.
+ *
+ * Returns -1 when there is nothing valid to build on -- off the grid, or a tile
+ * with a player standing in it. Building someone into a box would be funny once
+ * and infuriating forever, and it is also how you trap yourself.
+ */
+export function buildTargetTile(w: World, p: Player): number {
+  const tx = p.x + Math.cos(p.aim) * BUILD_REACH;
+  const ty = p.y + Math.sin(p.aim) * BUILD_REACH * Y_SQUASH;
+  const i = tileAtWorld(w.walls, tx, ty);
+  if (i < 0) return -1;
+
+  // Already at maximum reinforcement -- nothing more to add.
+  if (w.walls.tier[i] === WallTier.Reinforced && w.walls.hp[i]! >= TIER_MAX_HP[WallTier.Reinforced]!) {
+    return -1;
+  }
+
+  const minX = tileMinX(w.walls, i);
+  const minY = tileMinY(w.walls, i);
+  for (const other of w.players) {
+    if (!other.active || !other.alive) continue;
+    // A player's own tile is excluded too, so you cannot wall up your own feet.
+    if (
+      other.x + PLAYER_RADIUS > minX &&
+      other.x - PLAYER_RADIUS < minX + TILE_SIZE &&
+      other.y + PLAYER_RADIUS > minY &&
+      other.y - PLAYER_RADIUS < minY + TILE_SIZE
+    ) {
+      return -1;
+    }
+  }
+  return i;
 }
 
 function setAction(p: Player, a: ActionState): void {
@@ -139,6 +195,8 @@ export function stepPlayer(w: World, p: Player, input: InputFrame): void {
       doPlace(w, p);
     } else if (p.action === ActionState.PickingUp && p.actionTicks === PICKUP_TRANSFER_TICK) {
       doPickup(w, p);
+    } else if (p.action === ActionState.Building && p.actionTicks === BUILD_TRANSFER_TICK) {
+      doBuild(w, p);
     }
 
     if (p.actionTicks >= dur) {
@@ -160,6 +218,10 @@ export function stepPlayer(w: World, p: Player, input: InputFrame): void {
     if (hasButton(input, Button.Throw) && p.heldBall >= 0 && p.throwCooldown === 0) {
       p.pendingThrowPower = input.throwPower;
       setAction(p, ActionState.WindUp);
+    } else if (hasButton(input, Button.Build) && p.heldBall >= 0) {
+      // Building spends the held snowball, so packing feeds both offence and
+      // defence out of one resource -- no separate economy to explain.
+      if (buildTargetTile(w, p) >= 0) setAction(p, ActionState.Building);
     } else if (hasButton(input, Button.Place) && p.heldBall >= 0) {
       setAction(p, ActionState.Placing);
     } else if (hasButton(input, Button.Pickup) && p.heldBall < 0) {
@@ -292,6 +354,15 @@ export function stepPlayer(w: World, p: Player, input: InputFrame): void {
     }
   }
 
+  // Walls. Velocity is zeroed only on the axis that was corrected, so running
+  // along a wall keeps its tangential speed instead of grinding to a halt.
+  if (resolveCircleAgainstWalls(w.walls, p.x, p.y, PLAYER_RADIUS, wallResolve)) {
+    p.x = wallResolve.x;
+    p.y = wallResolve.y;
+    if (wallResolve.hitX) p.vx = 0;
+    if (wallResolve.hitY) p.vy = 0;
+  }
+
   // Carry the held ball with the hand.
   if (p.heldBall >= 0) {
     const held = w.balls[p.heldBall];
@@ -344,6 +415,35 @@ function doPickup(w: World, p: Player): void {
   b.stateTick = w.tick;
   p.heldBall = b.id;
   pushEvent(w, SimEventType.PickedUp, p.id, p.x, p.y, 0, 0, b.id);
+}
+
+function doBuild(w: World, p: Player): void {
+  if (p.heldBall < 0) return;
+  // Re-check the target: the player may have turned or walked during the channel,
+  // or someone may have stepped into the tile.
+  const i = buildTargetTile(w, p);
+  if (i < 0) return;
+
+  const b = w.balls[p.heldBall];
+  if (!b || !b.alive) {
+    p.heldBall = -1;
+    return;
+  }
+
+  const tier = buildAt(w.walls, i, BUILD_HP_PER_BALL);
+  p.heldBall = -1;
+  freeBall(w, b);
+
+  pushEvent(
+    w,
+    SimEventType.WallBuilt,
+    i,
+    tileCenterX(w.walls, i),
+    tileCenterY(w.walls, i),
+    0,
+    tier,
+    p.id,
+  );
 }
 
 /** Drop whatever the player is holding, e.g. on elimination. */

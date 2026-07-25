@@ -18,12 +18,17 @@ import {
   PICKUP_RADIUS,
   SimEventType,
   TICK_DT,
+  applyMap,
+  buildTargetTile,
+  countWalls,
   createWorld,
   findGroundedBallNear,
   getSkin,
   skinIds,
   spawnPlayer,
   step,
+  tileAtWorld,
+  wallHeightAt,
   type InputFrame,
   type World,
 } from '@snow/shared';
@@ -40,7 +45,7 @@ import type { Camera, Viewport } from './render/projection.js';
 const LOCAL_PLAYER = 0;
 
 /** Debug overlay line count * line height + padding. Kept in sync with drawDebug. */
-const DEBUG_PANEL_LINES = 8;
+const DEBUG_PANEL_LINES = 9;
 const DEBUG_PANEL_HEIGHT = DEBUG_PANEL_LINES * 14 + 12;
 
 export interface GameOptions {
@@ -74,7 +79,7 @@ export class Game {
     this.ctx = ctx;
 
     this.world = createWorld(0x51e161, MAP_ARENA01.bounds);
-    this.world.props = MAP_ARENA01.props.map((p) => ({ ...p }));
+    applyMap(this.world, MAP_ARENA01);
 
     const ids = skinIds();
     this.skinIdx = Math.max(0, ids.indexOf(opts.skinId));
@@ -190,6 +195,20 @@ export class Game {
         case SimEventType.WallHit:
           this.particles.burst(e.x, e.y, e.z, 12, { speed: 120, up: 60, size: 2.4 });
           break;
+        case SimEventType.WallBuilt:
+          this.particles.burst(e.x, e.y, 6, 14, { speed: 70, up: 90, size: 2.6 });
+          this.showHint('Snowballs chip walls down. Chip one low enough and you can throw over it.', 5);
+          break;
+        case SimEventType.WallDestroyed:
+          // A bigger burst, at the height the wall used to stand, so the collapse
+          // reads from where the wall was rather than from the ground.
+          this.particles.burst(e.x, e.y, e.amount * 0.5, 26, {
+            speed: 150,
+            up: 130,
+            size: 3.1,
+            life: 0.7,
+          });
+          break;
         case SimEventType.Bounced:
           this.particles.burst(e.x, e.y, 2, 5, { speed: 50, up: 40, size: 1.8, life: 0.3 });
           break;
@@ -218,6 +237,12 @@ export class Game {
 
     const holdingBall = me.heldBall >= 0;
     const aimPower = this.input.previewPower();
+    const buildTarget = holdingBall ? buildTargetTile(this.world, me) : -1;
+
+    // Keep the button's hit test in sync with what is actually drawn, so a tap
+    // can never land on an invisible button or miss a visible one.
+    this.input.buildButtonVisible = holdingBall;
+    this.input.bottomInset = this.opts.debug ? DEBUG_PANEL_HEIGHT + 8 : 0;
 
     this.renderer.render(this.ctx, {
       world: this.world,
@@ -231,6 +256,7 @@ export class Game {
       showAim: holdingBall,
       aimAngle: me.aim,
       aimPower,
+      buildTarget,
       debug: this.opts.debug,
     });
 
@@ -251,7 +277,8 @@ export class Game {
       fps: this.loop.fps,
       showDebug: this.opts.debug,
       hint: performance.now() < this.hintUntil ? this.hint : '',
-      bottomInset: this.opts.debug ? DEBUG_PANEL_HEIGHT + 8 : 0,
+      bottomInset: this.input.bottomInset,
+      canBuild: buildTarget >= 0,
     };
     drawHud(this.ctx, model);
 
@@ -271,6 +298,7 @@ export class Game {
       `input move ${f?.moveX.toFixed(2)},${f?.moveY.toFixed(2)} packDelta ${f?.packDelta.toFixed(3)}`,
       `gesture state ${this.input.gestures.state} turns ${this.input.gestures.circleTurns.toFixed(2)}`,
       `balls ${this.world.balls.filter((b) => b.alive).length} (grounded ${this.world.balls.filter((b) => b.alive && b.state === BallState.Grounded).length})`,
+      `walls ${countWalls(this.world.walls)}  buildTarget ${buildTargetTile(this.world, me)}`,
     ];
 
     ctx.save();
@@ -290,6 +318,56 @@ export class Game {
   private showHint(text: string, seconds: number): void {
     this.hint = text;
     this.hintUntil = performance.now() + seconds * 1000;
+  }
+
+  /**
+   * A read-only snapshot for automated tests.
+   *
+   * Exposed as a method rather than letting the harness reach into internals and
+   * re-derive things like the build target: a test that reimplements the logic it
+   * is checking will happily agree with itself while the game is broken.
+   */
+  debugState(): {
+    tick: number;
+    wallCount: number;
+    buildTarget: number;
+    targetHeight: number;
+    heldBall: number;
+    packProgress: number;
+  } {
+    const me = this.me;
+    const target = buildTargetTile(this.world, me);
+    return {
+      tick: this.world.tick,
+      wallCount: countWalls(this.world.walls),
+      buildTarget: target,
+      targetHeight: target >= 0 ? wallHeightAt(this.world.walls, target) : 0,
+      heldBall: me.heldBall,
+      packProgress: me.packProgress,
+    };
+  }
+
+  /** Height of the wall tile nearest a world position, for test assertions. */
+  wallHeightNear(x: number, y: number): number {
+    return wallHeightAt(this.world.walls, tileAtWorld(this.world.walls, x, y));
+  }
+
+  /**
+   * Total standing wall height across the arena.
+   *
+   * The right quantity to assert on for "walls can be built and destroyed": tile
+   * COUNT misses a build that reinforces an existing wall rather than adding a new
+   * one, and a SINGLE tile's height misses a throw that landed one tile over on a
+   * multi-tile wall. Both of those produced intermittent test failures against a
+   * game that was working correctly.
+   */
+  wallHeightTotal(): number {
+    const g = this.world.walls;
+    let total = 0;
+    for (let i = 0; i < g.tier.length; i++) {
+      if (g.tier[i]! > 0) total += wallHeightAt(g, i);
+    }
+    return total;
   }
 
   /** Cycle the local player's skin at runtime -- proves the swap needs no reload. */

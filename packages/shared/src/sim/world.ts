@@ -17,6 +17,7 @@
 
 import { MAX_BALLS, MAX_HP } from '../constants.js';
 import { createRng, type RngState } from '../math/rng.js';
+import { createWallGrid, type WallGrid } from './walls.js';
 import {
   ActionState,
   BallSize,
@@ -114,6 +115,7 @@ export interface World {
   balls: Ball[];
   freeBalls: number[];
   props: Prop[];
+  walls: WallGrid;
   /** Cleared at the start of every tick. Never read back by the simulation. */
   events: SimEvent[];
 }
@@ -185,6 +187,7 @@ export function createWorld(seed: number, bounds: WorldBounds): World {
     balls,
     freeBalls,
     props: [],
+    walls: createWallGrid(bounds),
     events: [],
   };
 }
@@ -284,6 +287,16 @@ export function hashWorld(w: World): number {
     mix(Math.round(b.x * 64));
     mix(Math.round(b.y * 64));
     mix(Math.round(b.z * 64));
+  }
+  // Walls are part of gameplay state, so a desync in the grid has to show up in
+  // the hash. Only non-empty tiles, so the cost tracks what is actually built.
+  const wg = w.walls;
+  for (let i = 0; i < wg.tier.length; i++) {
+    const t = wg.tier[i]!;
+    if (t === 0) continue;
+    mix(i);
+    mix(t);
+    mix(wg.hp[i]!);
   }
   return h >>> 0;
 }
