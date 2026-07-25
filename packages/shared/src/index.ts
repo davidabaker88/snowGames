@@ -19,6 +19,17 @@ export * from './sim/snowball.js';
 export * from './sim/player.js';
 export * from './sim/step.js';
 
+export * from './modes/types.js';
+export * from './modes/common.js';
+export * from './modes/ctx.js';
+export * from './modes/registry.js';
+export * from './modes/sandbox.js';
+export * from './modes/lastOneStanding.js';
+export * from './modes/teamWar.js';
+export * from './modes/captureTheFlag.js';
+export * from './modes/kingOfTheHill.js';
+export * from './sim/bot.js';
+
 export * from './anim/skinTypes.js';
 export * from './anim/clipTypes.js';
 export * from './anim/skeleton.js';

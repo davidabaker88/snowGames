@@ -217,6 +217,14 @@ export const THROW_COOLDOWN_TICKS = secondsToTicks(0.18);
 // ---------------------------------------------------------------------------
 
 export const MAX_HP = 100;
+
+/**
+ * How long a dropped capture-the-flag flag waits before returning itself home.
+ *
+ * Lives here rather than in the CTF mode because eliminations happen deep in the
+ * projectile code, which drops the flag without knowing which mode is running.
+ */
+export const FLAG_RETURN_TICKS = secondsToTicks(25);
 export const DUMMY_HP = 60;
 export const DUMMY_RESET_TICKS = secondsToTicks(3);
 

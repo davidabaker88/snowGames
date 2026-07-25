@@ -149,7 +149,7 @@ async function run(): Promise<void> {
     });
 
     console.log('\n=== Boot ===');
-    await page.goto(`${base}/?debug`, { waitUntil: 'networkidle' });
+    await page.goto(`${base}/?mode=sandbox&debug`, { waitUntil: 'networkidle' });
     await page.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
     await installProbe(page);
     await page.waitForTimeout(700);
@@ -298,7 +298,7 @@ async function run(): Promise<void> {
     const wallPage = await wallCtx.newPage();
     const wallErrors: string[] = [];
     wallPage.on('pageerror', (e) => wallErrors.push(String(e)));
-    await wallPage.goto(`${base}/?debug`, { waitUntil: 'networkidle' });
+    await wallPage.goto(`${base}/?mode=sandbox&debug`, { waitUntil: 'networkidle' });
     await wallPage.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
     await installProbe(wallPage);
     await wallPage.waitForTimeout(600);
@@ -465,6 +465,143 @@ async function run(): Promise<void> {
     await wallPage.screenshot({ path: `${OUT}/16-wall-built.png` });
     await wallCtx.close();
 
+    console.log('\n=== Game modes ===');
+    const modeCtx = await browser.newContext({
+      viewport: { width: 844, height: 390 },
+      deviceScaleFactor: 2,
+      hasTouch: true,
+      isMobile: true,
+    });
+
+    interface ModeProbe {
+      modeId: string;
+      phase: number;
+      teamScores: number[];
+      myTeam: number;
+      alive: number;
+      activePlayers: number;
+      winnerTeam: number;
+      winnerPlayer: number;
+      ringRadius: number;
+      flagStates: number[];
+      zoneOwner: number;
+      tick: number;
+    }
+
+    const modeState = async (pg: Page): Promise<ModeProbe> =>
+      pg.evaluate(
+        () =>
+          (
+            window as unknown as { __snowGame: { debugState(): ModeProbe } }
+          ).__snowGame.debugState() as ModeProbe,
+      );
+
+    // The picker appears when no mode is given in the URL.
+    const pickerPage = await modeCtx.newPage();
+    await pickerPage.goto(`${base}/`, { waitUntil: 'networkidle' });
+    await pickerPage.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
+    await pickerPage.waitForTimeout(400);
+    const buttons = await pickerPage.locator('.mode-btn').count();
+    check('the mode picker lists every mode', buttons === 6, `${buttons} buttons`);
+
+    // Every choice must be on screen at once on a landscape phone. The card can
+    // scroll, and that is the trap: it scrolls silently, so a mode below the fold
+    // reads as a mode that does not exist. Measured rather than eyeballed because
+    // this regresses whenever a blurb gains a line.
+    const fit = await pickerPage.evaluate(() => {
+      const els = [
+        ...document.querySelectorAll('.mode-btn'),
+        ...document.querySelectorAll('.mode-bots'),
+      ];
+      let worst = 0;
+      for (const el of els) {
+        const r = el.getBoundingClientRect();
+        worst = Math.max(worst, r.bottom);
+      }
+      return { worst, vh: window.innerHeight, n: els.length };
+    });
+    check(
+      'every mode and the bot slider fit on a landscape phone',
+      fit.worst <= fit.vh + 1,
+      `lowest edge ${fit.worst.toFixed(0)} of ${fit.vh} (${fit.n} elements)`,
+    );
+    await pickerPage.screenshot({ path: `${OUT}/17-mode-picker.png` });
+
+    // Picking from the picker actually starts that mode.
+    await pickerPage.locator('.mode-btn', { hasText: 'Capture the Flag' }).click();
+    await pickerPage.waitForTimeout(700);
+    const picked = await modeState(pickerPage);
+    check('picking a mode starts it', picked.modeId === 'captureTheFlag', picked.modeId);
+    check('the picker closes on pick', !(await pickerPage.isVisible('.mode-select')));
+    await pickerPage.close();
+
+    // Each mode boots, fills its slots with bots, and runs.
+    for (const mode of [
+      'lastOneStanding',
+      'teamWar',
+      'captureTheFlag',
+      'kingOfTheHill',
+      'fortDefense',
+    ]) {
+      const pg = await modeCtx.newPage();
+      const errs: string[] = [];
+      pg.on('pageerror', (e) => errs.push(String(e)));
+      pg.on('console', (m) => {
+        if (m.type() === 'error') errs.push(m.text());
+      });
+      await pg.goto(`${base}/?mode=${mode}&bots=5&debug`, { waitUntil: 'networkidle' });
+      await pg.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
+      await pg.waitForTimeout(2500);
+
+      const s = await modeState(pg);
+      check(`${mode}: boots with bots`, s.modeId === mode && s.activePlayers === 6, `${s.modeId}, ${s.activePlayers} players`);
+      check(`${mode}: no runtime errors`, errs.length === 0, errs.slice(0, 2).join(' | '));
+
+      // Mode-specific objective state is actually live.
+      if (mode === 'teamWar' || mode === 'captureTheFlag') {
+        check(`${mode}: assigns teams`, s.myTeam === 0 || s.myTeam === 1, `team ${s.myTeam}`);
+      }
+      if (mode === 'captureTheFlag') {
+        check(`${mode}: both flags are in play`, s.flagStates.length === 2, JSON.stringify(s.flagStates));
+      }
+      if (mode === 'lastOneStanding') {
+        check(`${mode}: the blizzard exists`, s.ringRadius > 0, `radius ${s.ringRadius.toFixed(0)}`);
+      }
+      if (mode === 'kingOfTheHill' || mode === 'fortDefense') {
+        check(`${mode}: the zone is active`, s.zoneOwner !== -99, `owner ${s.zoneOwner}`);
+      }
+
+      await pg.screenshot({ path: `${OUT}/18-mode-${mode}.png` });
+      await pg.close();
+    }
+
+    // A short match, played out by bots, must reach a winner in the browser too.
+    const finishPage = await modeCtx.newPage();
+    const finishErrs: string[] = [];
+    finishPage.on('pageerror', (e) => finishErrs.push(String(e)));
+    await finishPage.goto(`${base}/?mode=lastOneStanding&bots=3&debug`, {
+      waitUntil: 'networkidle',
+    });
+    await finishPage.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
+
+    // Bots fight it out. Poll rather than sleeping a fixed time.
+    let finished = false;
+    for (let i = 0; i < 60 && !finished; i++) {
+      await finishPage.waitForTimeout(1000);
+      const s = await modeState(finishPage);
+      if (s.phase === 2) finished = true;
+    }
+    const finalState = await modeState(finishPage);
+    check(
+      'a bot match plays through to a winner in the browser',
+      finished,
+      `phase ${finalState.phase}, ${finalState.alive} alive after ${finalState.tick} ticks`,
+    );
+    check('the finished match had no errors', finishErrs.length === 0, finishErrs.slice(0, 2).join(' | '));
+    await finishPage.screenshot({ path: `${OUT}/19-match-result.png` });
+    await finishPage.close();
+    await modeCtx.close();
+
     console.log('\n=== The swappable-skin promise ===');
     await page.evaluate(() => window.__snowInput.key('KeyK', 60));
     await page.waitForTimeout(400);
@@ -480,7 +617,7 @@ async function run(): Promise<void> {
     const page2 = await ctx.newPage();
     const errors2: string[] = [];
     page2.on('pageerror', (e) => errors2.push(String(e)));
-    await page2.goto(`${base}/?skin=chicken&debug`, { waitUntil: 'networkidle' });
+    await page2.goto(`${base}/?mode=sandbox&skin=chicken&debug`, { waitUntil: 'networkidle' });
     await page2.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
     await installProbe(page2);
     await page2.waitForTimeout(600);
@@ -515,7 +652,7 @@ async function run(): Promise<void> {
     const pageL = await landCtx.newPage();
     const errorsL: string[] = [];
     pageL.on('pageerror', (e) => errorsL.push(String(e)));
-    await pageL.goto(`${base}/?debug`, { waitUntil: 'networkidle' });
+    await pageL.goto(`${base}/?mode=sandbox&debug`, { waitUntil: 'networkidle' });
     await pageL.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
     await installProbe(pageL);
     await pageL.waitForTimeout(500);
@@ -545,7 +682,7 @@ async function run(): Promise<void> {
     const page4 = await deskCtx.newPage();
     const errors4: string[] = [];
     page4.on('pageerror', (e) => errors4.push(String(e)));
-    await page4.goto(`${base}/?debug`, { waitUntil: 'networkidle' });
+    await page4.goto(`${base}/?mode=sandbox&debug`, { waitUntil: 'networkidle' });
     await page4.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
     await page4.waitForTimeout
       ? await page4.waitForTimeout(600)

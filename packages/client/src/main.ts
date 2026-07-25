@@ -1,5 +1,5 @@
 import './styles.css';
-import { DEFAULT_SKIN_ID, skinIds } from '@snow/shared';
+import { DEFAULT_SKIN_ID, isModeId, skinIds, type ModeId } from '@snow/shared';
 import { Game } from './game.js';
 import { startRigLab } from './dev/rigLab.js';
 
@@ -16,10 +16,20 @@ if (params.get('dev') === 'rig') {
   const requested = params.get('skin') ?? DEFAULT_SKIN_ID;
   const skinId = skinIds().includes(requested) ? requested : DEFAULT_SKIN_ID;
 
+  // `?mode=` skips the picker, which is what the automated tests and a shared link
+  // both want. Without it the picker opens.
+  const requestedMode = params.get('mode');
+  const modeId: ModeId | undefined =
+    requestedMode && isModeId(requestedMode) ? requestedMode : undefined;
+  const botsParam = Number(params.get('bots'));
+  const bots = Number.isFinite(botsParam) && botsParam >= 0 ? Math.min(9, botsParam) : 5;
+
   const game = new Game({
     canvas,
     skinId,
     debug: params.has('debug'),
+    modeId,
+    bots: modeId === 'sandbox' ? 0 : bots,
   });
   game.start();
 

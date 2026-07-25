@@ -61,6 +61,30 @@ export const enum SimEventType {
   Bounced = 8,
   WallBuilt = 9,
   WallDestroyed = 10,
+  Scored = 11,
+  Respawned = 12,
+  RoundStart = 13,
+  RoundEnd = 14,
+  FlagTaken = 15,
+  FlagDropped = 16,
+  FlagReturned = 17,
+  FlagCaptured = 18,
+  ZoneCaptured = 19,
+  RingDamage = 20,
+}
+
+/** Where a capture-the-flag flag currently is. */
+export const enum FlagState {
+  AtBase = 0,
+  Carried = 1,
+  Dropped = 2,
+}
+
+export const enum MatchPhase {
+  /** Pre-match: no damage, used by Fort Defense for its build window. */
+  Warmup = 0,
+  Playing = 1,
+  Ended = 2,
 }
 
 /**

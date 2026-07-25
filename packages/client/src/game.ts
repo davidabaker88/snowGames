@@ -14,22 +14,31 @@ import {
   DUMMY_HP,
   MAP_ARENA01,
   MAX_HP,
+  MatchPhase,
   PACK_ROTATIONS_REQUIRED,
   PICKUP_RADIUS,
   SimEventType,
   TICK_DT,
   applyMap,
+  botInput,
   buildTargetTile,
   countWalls,
+  createBotBrain,
+  createModeHud,
   createWorld,
   findGroundedBallNear,
+  getMode,
   getSkin,
   skinIds,
   spawnPlayer,
+  startMatch,
   step,
   tileAtWorld,
   wallHeightAt,
+  type BotBrain,
   type InputFrame,
+  type ModeHud,
+  type ModeId,
   type World,
 } from '@snow/shared';
 import { GameLoop, resizeCanvas } from './loop.js';
@@ -40,18 +49,29 @@ import { createCamera, followCamera, snapCamera, updateZoom } from './render/cam
 import { createTerrain, type Terrain } from './render/terrain.js';
 import { ParticleSystem } from './render/particles.js';
 import { drawHud, type HudModel } from './hud/hud.js';
+import { drawModeHud, drawSpectatorNotice } from './hud/modeHud.js';
+import { ModeSelect } from './hud/modeSelect.js';
 import type { Camera, Viewport } from './render/projection.js';
+
+/** Safe-area top inset, read from the CSS variable the stylesheet publishes. */
+function safeTop(): number {
+  const v = parseFloat(getComputedStyle(document.body).getPropertyValue('--sat'));
+  return Number.isFinite(v) ? v : 0;
+}
 
 const LOCAL_PLAYER = 0;
 
 /** Debug overlay line count * line height + padding. Kept in sync with drawDebug. */
-const DEBUG_PANEL_LINES = 9;
+const DEBUG_PANEL_LINES = 10;
 const DEBUG_PANEL_HEIGHT = DEBUG_PANEL_LINES * 14 + 12;
 
 export interface GameOptions {
   canvas: HTMLCanvasElement;
   skinId: string;
   debug: boolean;
+  /** Mode to start in. Omit to show the picker. */
+  modeId?: ModeId;
+  bots?: number;
 }
 
 export class Game {
@@ -72,46 +92,44 @@ export class Game {
   private hintUntil = 0;
   private skinIdx = 0;
 
+  private brains: BotBrain[] = [];
+  private modeHudModel: ModeHud = createModeHud();
+  private modeSelect: ModeSelect;
+  private inputSeq = 0;
+  /** Whose eyes we are watching through: the local player, or a survivor. */
+  private cameraTarget = LOCAL_PLAYER;
+  /** Set when the match has ended, so a tap restarts rather than acting in-game. */
+  private awaitingRestart = false;
+  private currentModeId: ModeId;
+  private currentBots: number;
+
   constructor(private readonly opts: GameOptions) {
     const canvas = opts.canvas;
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) throw new Error('2D canvas context unavailable');
     this.ctx = ctx;
 
-    this.world = createWorld(0x51e161, MAP_ARENA01.bounds);
-    applyMap(this.world, MAP_ARENA01);
-
     const ids = skinIds();
     this.skinIdx = Math.max(0, ids.indexOf(opts.skinId));
 
-    const spawn = MAP_ARENA01.spawns[0]!;
-    spawnPlayer(this.world, {
-      x: spawn.x,
-      y: spawn.y,
-      name: 'You',
-      skinId: opts.skinId,
-    });
-
-    // Training dummies wear the OTHER skin, so both rigs are on screen at once
-    // and a regression in either is immediately visible.
-    const otherSkin = ids.find((s) => s !== opts.skinId) ?? opts.skinId;
-    for (const d of MAP_ARENA01.dummies) {
-      spawnPlayer(this.world, {
-        x: d.x,
-        y: d.y,
-        isDummy: true,
-        hp: DUMMY_HP,
-        skinId: otherSkin,
-      });
-    }
+    this.currentModeId = opts.modeId ?? 'sandbox';
+    this.currentBots = opts.bots ?? 0;
 
     this.terrain = createTerrain(MAP_ARENA01.bounds, 1);
     this.input = new InputController(canvas);
     this.input.attach();
     installDebugDriver(canvas);
 
+    // Built before the loop starts, so there is always a world to render.
+    this.world = this.buildMatch(this.currentModeId, this.currentBots);
+
+    this.modeSelect = new ModeSelect(document.getElementById('hud') ?? document.body, {
+      onPick: (id, bots) => this.startMode(id, bots),
+    });
+    if (!opts.modeId) this.modeSelect.show();
+
     this.resize();
-    snapCamera(this.cam, spawn.x, spawn.y);
+    snapCamera(this.cam, this.me.x, this.me.y);
 
     this.loop = new GameLoop({
       tick: () => this.tick(),
@@ -122,6 +140,69 @@ export class Game {
     window.addEventListener('orientationchange', () => this.resize());
 
     this.showHint('Left thumb to move. Circle with your right thumb to pack a snowball.', 7);
+  }
+
+  /**
+   * Build a fresh world for a mode.
+   *
+   * Rebuilt from scratch per match rather than reset in place: a half-cleared
+   * world is where stale-state bugs live, and building one is cheap.
+   */
+  private buildMatch(modeId: ModeId, bots: number): World {
+    const mode = getMode(modeId);
+    const w = createWorld(0x51e161, MAP_ARENA01.bounds, mode);
+    applyMap(w, MAP_ARENA01);
+
+    const ids = skinIds();
+    const spawn = MAP_ARENA01.spawns[0]!;
+    spawnPlayer(w, { x: spawn.x, y: spawn.y, name: 'You', skinId: this.opts.skinId });
+
+    // Bots wear the OTHER skin, so both rigs are on screen at once and a
+    // regression in either is immediately visible.
+    const otherSkin = ids.find((s) => s !== this.opts.skinId) ?? this.opts.skinId;
+    this.brains = [];
+    for (let i = 0; i < bots; i++) {
+      const spot = MAP_ARENA01.spawns[(i + 1) % MAP_ARENA01.spawns.length]!;
+      spawnPlayer(w, {
+        x: spot.x,
+        y: spot.y,
+        name: `Bot ${i + 1}`,
+        skinId: i % 2 === 0 ? otherSkin : this.opts.skinId,
+      });
+      this.brains.push(createBotBrain(i + 1, 0x51e161 + i, 0.5));
+    }
+
+    // Practice keeps its training dummies; competitive modes have real opponents.
+    if (mode.id === 'sandbox') {
+      for (const d of MAP_ARENA01.dummies) {
+        spawnPlayer(w, { x: d.x, y: d.y, isDummy: true, hp: DUMMY_HP, skinId: otherSkin });
+      }
+    }
+
+    startMatch(w);
+    this.cameraTarget = LOCAL_PLAYER;
+    this.awaitingRestart = false;
+    this.particles = new ParticleSystem();
+    return w;
+  }
+
+  /** Switch modes, which means a whole new match. */
+  startMode(modeId: ModeId, bots: number): void {
+    this.currentModeId = modeId;
+    this.currentBots = bots;
+    this.world = this.buildMatch(modeId, bots);
+    this.terrain = createTerrain(MAP_ARENA01.bounds, 1);
+    snapCamera(this.cam, this.me.x, this.me.y);
+    this.showHint(getMode(modeId).blurb, 6);
+  }
+
+  /** Re-run the current mode. */
+  restart(): void {
+    this.startMode(this.currentModeId, this.currentBots);
+  }
+
+  openModeSelect(): void {
+    this.modeSelect.show();
   }
 
   start(): void {
@@ -163,12 +244,55 @@ export class Game {
     });
     this.currentInput = frame;
 
-    const inputs = new Map([[LOCAL_PLAYER, frame]]);
+    // Any action ends the results screen. Reusing the existing gesture buttons
+    // rather than adding a "play again" control means the tap that would have
+    // been a throw restarts instead, which is what a player reaches for anyway.
+    if (this.awaitingRestart) {
+      if (frame.buttons !== 0 || this.input.keyboard.throwPressed) {
+        this.restart();
+        return;
+      }
+    }
+
+    // Bots produce the SAME InputFrame a thumb does and go into the same map, so
+    // the simulation has no idea which players are bots.
+    const inputs = new Map<number, InputFrame>();
+    inputs.set(LOCAL_PLAYER, frame);
+    this.inputSeq++;
+    for (const b of this.brains) {
+      inputs.set(b.playerId, botInput(this.world, b, this.inputSeq));
+    }
+
     const events = step(this.world, inputs, { mode: 'authoritative' });
 
     this.reactToEvents(events);
+    this.updateCameraTarget();
     this.renderer.tickDecals(this.terrain);
     this.time += TICK_DT;
+  }
+
+  /**
+   * Follow a survivor once the local player is out.
+   *
+   * Staring at your own corpse for the rest of a Last One Standing match is a
+   * miserable way to lose, and spectating costs nothing: pick a living player and
+   * point the camera at them.
+   */
+  private updateCameraTarget(): void {
+    const me = this.me;
+    if (me.alive) {
+      this.cameraTarget = LOCAL_PLAYER;
+      return;
+    }
+    const current = this.world.players[this.cameraTarget];
+    if (current?.active && current.alive && this.cameraTarget !== LOCAL_PLAYER) return;
+
+    for (const p of this.world.players) {
+      if (!p.active || p.isDummy || !p.alive) continue;
+      this.cameraTarget = p.id;
+      return;
+    }
+    this.cameraTarget = LOCAL_PLAYER;
   }
 
   /**
@@ -176,12 +300,17 @@ export class Game {
    * the client reacts. Nothing here can influence the simulation, which is what
    * keeps this safe to run on a client that is also receiving authoritative state.
    */
-  private reactToEvents(events: readonly { type: number; x: number; y: number; z: number; id: number; amount: number }[]): void {
+  private reactToEvents(events: readonly { type: number; x: number; y: number; z: number; id: number; other: number; amount: number }[]): void {
     for (const e of events) {
       switch (e.type) {
         case SimEventType.Packed:
           this.particles.burst(e.x, e.y, 12, 10, { speed: 60, up: 50, size: 2.2 });
-          this.showHint('Flick to throw. Long-press or double-tap to set it down.', 5);
+          // Particles for everyone; instructions only for the person being
+          // instructed. Five bots packing snow otherwise keeps a tutorial hint
+          // permanently on screen telling you to throw a ball you don't have.
+          if (e.id === LOCAL_PLAYER) {
+            this.showHint('Flick to throw. Long-press or double-tap to set it down.', 5);
+          }
           break;
         case SimEventType.Thrown:
           this.particles.burst(e.x, e.y, e.z, 6, { speed: 40, up: 20, size: 1.8, life: 0.3 });
@@ -197,7 +326,10 @@ export class Game {
           break;
         case SimEventType.WallBuilt:
           this.particles.burst(e.x, e.y, 6, 14, { speed: 70, up: 90, size: 2.6 });
-          this.showHint('Snowballs chip walls down. Chip one low enough and you can throw over it.', 5);
+          // `id` is the tile; the builder is in `other`.
+          if (e.other === LOCAL_PLAYER) {
+            this.showHint('Snowballs chip walls down. Chip one low enough and you can throw over it.', 5);
+          }
           break;
         case SimEventType.WallDestroyed:
           // A bigger burst, at the height the wall used to stand, so the collapse
@@ -218,6 +350,21 @@ export class Game {
         case SimEventType.PickedUp:
           this.particles.burst(e.x, e.y, 8, 5, { speed: 45, up: 40, size: 1.8 });
           break;
+        case SimEventType.RoundEnd:
+          this.awaitingRestart = true;
+          break;
+        case SimEventType.FlagTaken:
+          this.particles.burst(e.x, e.y, 20, 16, { speed: 90, up: 110, size: 2.8 });
+          break;
+        case SimEventType.FlagCaptured:
+          this.particles.burst(e.x, e.y, 24, 34, { speed: 150, up: 170, size: 3.2, life: 0.9 });
+          break;
+        case SimEventType.ZoneCaptured:
+          this.particles.burst(e.x, e.y, 10, 30, { speed: 160, up: 120, size: 3, life: 0.8 });
+          break;
+        case SimEventType.Respawned:
+          this.particles.burst(e.x, e.y, 10, 12, { speed: 70, up: 80, size: 2.4 });
+          break;
         case SimEventType.Melted:
           this.particles.burst(e.x, e.y, 2, 4, { speed: 22, up: 14, size: 1.6, life: 0.7 });
           break;
@@ -232,7 +379,8 @@ export class Game {
     const dt = dtMs / 1000;
     const me = this.me;
 
-    followCamera(this.cam, me.x, me.y, dt, this.vp, this.world.bounds);
+    const camTarget = this.world.players[this.cameraTarget] ?? me;
+    followCamera(this.cam, camTarget.x, camTarget.y, dt, this.vp, this.world.bounds);
     this.particles.update(dt);
 
     const holdingBall = me.heldBall >= 0;
@@ -276,11 +424,31 @@ export class Game {
       skinLabel: getSkin(me.skinId).label,
       fps: this.loop.fps,
       showDebug: this.opts.debug,
-      hint: performance.now() < this.hintUntil ? this.hint : '',
+      // A tutorial hint left up under the result banner is telling the player to
+      // do something the match no longer allows, so hints expire with the match.
+      hint:
+        this.world.match.phase !== MatchPhase.Ended && performance.now() < this.hintUntil
+          ? this.hint
+          : '',
       bottomInset: this.input.bottomInset,
       canBuild: buildTarget >= 0,
     };
     drawHud(this.ctx, model);
+
+    // The mode fills a pure-data model; this draws it. No mode writes canvas code.
+    this.world.mode.hud(this.world, LOCAL_PLAYER, this.modeHudModel);
+    drawModeHud(this.ctx, {
+      vp: this.vp,
+      model: this.modeHudModel,
+      world: this.world,
+      viewer: LOCAL_PLAYER,
+      top: 14 + safeTop() + 62,
+    });
+
+    if (!me.alive && this.cameraTarget !== LOCAL_PLAYER && this.world.match.phase !== MatchPhase.Ended) {
+      const watching = this.world.players[this.cameraTarget];
+      if (watching) drawSpectatorNotice(this.ctx, this.vp, watching.name);
+    }
 
     if (this.opts.debug) this.drawDebug();
   }
@@ -299,6 +467,7 @@ export class Game {
       `gesture state ${this.input.gestures.state} turns ${this.input.gestures.circleTurns.toFixed(2)}`,
       `balls ${this.world.balls.filter((b) => b.alive).length} (grounded ${this.world.balls.filter((b) => b.alive && b.state === BallState.Grounded).length})`,
       `walls ${countWalls(this.world.walls)}  buildTarget ${buildTargetTile(this.world, me)}`,
+      `mode ${this.world.mode.id} phase ${this.world.match.phase} scores ${this.world.match.teamScores.slice(0, 2).map((n) => Math.floor(n)).join('-')}`,
     ];
 
     ctx.save();
@@ -334,6 +503,17 @@ export class Game {
     targetHeight: number;
     heldBall: number;
     packProgress: number;
+    modeId: string;
+    phase: number;
+    teamScores: number[];
+    myTeam: number;
+    alive: number;
+    activePlayers: number;
+    winnerTeam: number;
+    winnerPlayer: number;
+    ringRadius: number;
+    flagStates: number[];
+    zoneOwner: number;
   } {
     const me = this.me;
     const target = buildTargetTile(this.world, me);
@@ -344,6 +524,17 @@ export class Game {
       targetHeight: target >= 0 ? wallHeightAt(this.world.walls, target) : 0,
       heldBall: me.heldBall,
       packProgress: me.packProgress,
+      modeId: this.world.mode.id,
+      phase: this.world.match.phase,
+      teamScores: this.world.match.teamScores.slice(0, 2),
+      myTeam: me.team,
+      alive: this.world.players.filter((p) => p.active && !p.isDummy && p.alive).length,
+      activePlayers: this.world.players.filter((p) => p.active && !p.isDummy).length,
+      winnerTeam: this.world.match.winnerTeam,
+      winnerPlayer: this.world.match.winnerPlayer,
+      ringRadius: this.world.ring.active ? this.world.ring.radius : 0,
+      flagStates: this.world.flags.filter((f) => f.active).map((f) => f.state),
+      zoneOwner: this.world.zones[0]?.active ? this.world.zones[0].owner : -99,
     };
   }
 

@@ -18,10 +18,14 @@
 import { MAX_BALLS, MAX_HP } from '../constants.js';
 import { createRng, type RngState } from '../math/rng.js';
 import { createWallGrid, type WallGrid } from './walls.js';
+import { SANDBOX } from '../modes/sandbox.js';
+import type { GameMode } from '../modes/types.js';
 import {
   ActionState,
   BallSize,
   BallState,
+  FlagState,
+  MatchPhase,
   TEAM_NONE,
   type EntityId,
   type PlayerId,
@@ -69,6 +73,13 @@ export interface Player {
 
   /** Visual-only stagger accumulator, driven by hits. Decays. */
   staggerAmount: number;
+
+  /** Per-player score, for free-for-all modes and the scoreboard. */
+  score: number;
+  /** Walls this player may still build; -1 means unlimited. */
+  buildsRemaining: number;
+  /** Flag being carried, or -1. */
+  carryingFlag: EntityId;
 }
 
 export interface Ball {
@@ -107,6 +118,67 @@ export interface Prop {
   kind: 'tree' | 'rock' | 'lamp' | 'crate';
 }
 
+/**
+ * Objective entities.
+ *
+ * These live on the World rather than inside a mode, so the renderer can draw them
+ * generically and modes just activate and drive the ones they need. A mode keeping
+ * its own private entities would mean new drawing code for every new mode, which is
+ * exactly what the mode framework exists to avoid.
+ */
+export interface Flag {
+  id: number;
+  active: boolean;
+  /** The team this flag belongs to (and that must bring it home to score). */
+  team: TeamId;
+  state: FlagState;
+  x: number;
+  y: number;
+  baseX: number;
+  baseY: number;
+  carrier: PlayerId;
+  /** Ticks until a dropped flag returns itself to base. */
+  returnTicks: number;
+}
+
+export interface Zone {
+  id: number;
+  active: boolean;
+  x: number;
+  y: number;
+  radius: number;
+  label: string;
+  /** Team currently holding it, or TEAM_NONE. */
+  owner: TeamId;
+  /** Capture progress toward `contender`, 0..1. */
+  progress: number;
+  contender: TeamId;
+}
+
+/** The closing blizzard in Last One Standing. */
+export interface Ring {
+  active: boolean;
+  x: number;
+  y: number;
+  radius: number;
+  targetRadius: number;
+  shrinkPerTick: number;
+  /** Ticks before the ring starts closing. */
+  delayTicks: number;
+}
+
+export interface MatchState {
+  phase: MatchPhase;
+  /** Ticks spent in the current phase. */
+  phaseTicks: number;
+  /** Counts down while playing; 0 means no limit. */
+  timeRemainingTicks: number;
+  teamScores: number[];
+  winnerTeam: TeamId;
+  winnerPlayer: PlayerId;
+  winReason: string;
+}
+
 export interface World {
   tick: number;
   rng: RngState;
@@ -116,6 +188,20 @@ export interface World {
   freeBalls: number[];
   props: Prop[];
   walls: WallGrid;
+  flags: Flag[];
+  zones: Zone[];
+  ring: Ring;
+  match: MatchState;
+  /**
+   * The active rules.
+   *
+   * A strategy object, not state: every mode is stateless and keeps all of its
+   * mutable data in the World above, so holding a reference here does not break
+   * replay or make the World impure. It lives on the World rather than being
+   * threaded through every call because deep code -- projectile impacts, for
+   * instance -- has to ask the mode whether a hit is even allowed.
+   */
+  mode: GameMode;
   /** Cleared at the start of every tick. Never read back by the simulation. */
   events: SimEvent[];
 }
@@ -146,6 +232,38 @@ function createPlayer(id: PlayerId): Player {
     throwCooldown: 0,
     pendingThrowPower: 0,
     staggerAmount: 0,
+    score: 0,
+    buildsRemaining: -1,
+    carryingFlag: -1,
+  };
+}
+
+function createFlag(id: EntityId): Flag {
+  return {
+    id,
+    active: false,
+    team: TEAM_NONE,
+    state: FlagState.AtBase,
+    x: 0,
+    y: 0,
+    baseX: 0,
+    baseY: 0,
+    carrier: -1,
+    returnTicks: 0,
+  };
+}
+
+function createZone(id: number): Zone {
+  return {
+    id,
+    active: false,
+    x: 0,
+    y: 0,
+    radius: 0,
+    label: '',
+    owner: TEAM_NONE,
+    progress: 0,
+    contender: TEAM_NONE,
   };
 }
 
@@ -168,7 +286,10 @@ function createBall(id: EntityId): Ball {
   };
 }
 
-export function createWorld(seed: number, bounds: WorldBounds): World {
+export const MAX_FLAGS = 4;
+export const MAX_ZONES = 4;
+
+export function createWorld(seed: number, bounds: WorldBounds, mode: GameMode = SANDBOX): World {
   const players: Player[] = [];
   for (let i = 0; i < MAX_PLAYERS; i++) players.push(createPlayer(i));
 
@@ -179,6 +300,11 @@ export function createWorld(seed: number, bounds: WorldBounds): World {
   // and debug output readable.
   for (let i = MAX_BALLS - 1; i >= 0; i--) freeBalls.push(i);
 
+  const flags: Flag[] = [];
+  for (let i = 0; i < MAX_FLAGS; i++) flags.push(createFlag(i));
+  const zones: Zone[] = [];
+  for (let i = 0; i < MAX_ZONES; i++) zones.push(createZone(i));
+
   return {
     tick: 0,
     rng: createRng(seed),
@@ -188,13 +314,42 @@ export function createWorld(seed: number, bounds: WorldBounds): World {
     freeBalls,
     props: [],
     walls: createWallGrid(bounds),
+    flags,
+    zones,
+    ring: {
+      active: false,
+      x: (bounds.minX + bounds.maxX) / 2,
+      y: (bounds.minY + bounds.maxY) / 2,
+      radius: 0,
+      targetRadius: 0,
+      shrinkPerTick: 0,
+      delayTicks: 0,
+    },
+    match: {
+      phase: MatchPhase.Warmup,
+      phaseTicks: 0,
+      timeRemainingTicks: 0,
+      teamScores: [0, 0, 0, 0],
+      winnerTeam: TEAM_NONE,
+      winnerPlayer: -1,
+      winReason: '',
+    },
+    mode,
     events: [],
   };
 }
 
 export function spawnPlayer(
   w: World,
-  opts: { name?: string; skinId?: string; x: number; y: number; isDummy?: boolean; hp?: number },
+  opts: {
+    name?: string;
+    skinId?: string;
+    x: number;
+    y: number;
+    isDummy?: boolean;
+    hp?: number;
+    team?: TeamId;
+  },
 ): Player | null {
   for (const p of w.players) {
     if (p.active) continue;
@@ -220,6 +375,10 @@ export function spawnPlayer(
     p.throwCooldown = 0;
     p.pendingThrowPower = 0;
     p.staggerAmount = 0;
+    p.score = 0;
+    p.buildsRemaining = -1;
+    p.carryingFlag = -1;
+    p.team = opts.team ?? TEAM_NONE;
     return p;
   }
   return null;

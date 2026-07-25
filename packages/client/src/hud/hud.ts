@@ -229,10 +229,14 @@ function drawStatus(ctx: CanvasRenderingContext2D, m: HudModel): void {
   // Scrim behind the HUD. The world is bright snow, so white text on it is close
   // to invisible -- this is legibility, not decoration. A soft gradient rather
   // than a hard panel so it does not read as a letterboxed bar.
-  const scrimH = top + 92;
+  // Tall enough to cover the mode HUD below it as well. Sizing this to the health
+  // block alone left the score chips and timer sitting on bare snow, which is
+  // where white text goes to disappear.
+  const scrimH = top + 150;
   const scrim = ctx.createLinearGradient(0, 0, 0, scrimH);
-  scrim.addColorStop(0, 'rgba(11,22,36,0.55)');
-  scrim.addColorStop(0.65, 'rgba(11,22,36,0.22)');
+  scrim.addColorStop(0, 'rgba(11,22,36,0.58)');
+  scrim.addColorStop(0.45, 'rgba(11,22,36,0.34)');
+  scrim.addColorStop(0.78, 'rgba(11,22,36,0.14)');
   scrim.addColorStop(1, 'rgba(11,22,36,0)');
   ctx.fillStyle = scrim;
   ctx.fillRect(0, 0, m.vp.width, scrimH);
@@ -251,9 +255,13 @@ function drawStatus(ctx: CanvasRenderingContext2D, m: HudModel): void {
   ctx.fillStyle = 'rgba(255,255,255,0.92)';
   ctx.fillText(m.alive ? `${Math.ceil(m.hp)} HP` : 'OUT', pad, top + bh + 6);
 
-  // Held-ball indicator.
+  // Held-ball indicator. Suppressed while out: a prompt to pick up a snowball
+  // sitting directly under the word OUT is instructing the player to do
+  // something the simulation will refuse.
   const iconY = top + bh + 26;
-  if (m.holdingBall) {
+  if (!m.alive) {
+    // nothing -- the mode HUD owns this space while spectating
+  } else if (m.holdingBall) {
     ctx.beginPath();
     ctx.arc(pad + 9, iconY + 9, 9, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';

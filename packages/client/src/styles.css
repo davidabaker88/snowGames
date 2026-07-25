@@ -105,3 +105,154 @@ body {
   line-height: 1.5;
   margin-top: 8px;
 }
+
+/*
+ * Mode picker.
+ *
+ * DOM rather than canvas because it is a list of buttons shown while paused: real
+ * tap targets, real scrolling, real text layout. The canvas HUD is for things that
+ * track a moving thumb.
+ *
+ * Palette taken from the game itself -- the navy is the arena's off-map void and
+ * the accent is the orange from the chicken skin -- so the chrome and the world
+ * read as one thing.
+ */
+.mode-select {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: max(12px, env(safe-area-inset-top)) 14px max(12px, env(safe-area-inset-bottom));
+  background: rgb(13 27 42 / 0.82);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+  z-index: 20;
+}
+
+.mode-select[hidden] {
+  display: none;
+}
+
+.mode-card {
+  width: min(560px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  background: #16283c;
+  border: 1px solid #2c4459;
+  border-radius: 14px;
+  padding: 20px 20px 16px;
+  color: #e9f1fa;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 0.45);
+}
+
+.mode-card h1 {
+  margin: 0 0 4px;
+  font-size: clamp(22px, 6vw, 28px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.mode-sub {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #93a8bf;
+}
+
+/* Grid + gap rather than per-button margins, so spacing cannot double up. */
+.mode-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.mode-btn {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  padding: 11px 13px;
+  background: #1d3450;
+  border: 1px solid #2c4459;
+  border-radius: 9px;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.mode-btn:hover {
+  background: #223c56;
+  border-color: #3d6182;
+}
+
+.mode-btn:focus-visible {
+  outline: 2px solid #f2a63b;
+  outline-offset: 2px;
+}
+
+.mode-name {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.mode-blurb {
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: #93a8bf;
+}
+
+.mode-bots {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #c3d4e6;
+}
+
+.mode-bots input[type='range'] {
+  width: 100%;
+  accent-color: #f2a63b;
+}
+
+/*
+ * Landscape phone -- the orientation the game actually asks for.
+ *
+ * Six modes in one column does not fit in 390px of height, and the card's own
+ * `overflow-y: auto` is a trap here: it scrolls silently, so two of the modes and
+ * the opponents slider simply appear not to exist. Two columns and a tighter
+ * rhythm put every choice on screen at once, which is the only acceptable state
+ * for a screen whose entire job is choosing.
+ */
+@media (max-height: 560px) {
+  .mode-card {
+    width: min(760px, 100%);
+    padding: 14px 16px 12px;
+  }
+
+  .mode-card h1 {
+    font-size: 22px;
+  }
+
+  .mode-sub {
+    margin-bottom: 10px;
+    font-size: 12.5px;
+  }
+
+  .mode-list {
+    grid-template-columns: 1fr 1fr;
+    gap: 7px;
+    margin-bottom: 10px;
+  }
+
+  .mode-btn {
+    padding: 9px 11px;
+  }
+
+  .mode-name {
+    font-size: 14px;
+  }
+
+  .mode-blurb {
+    font-size: 12px;
+    line-height: 1.35;
+  }
+}

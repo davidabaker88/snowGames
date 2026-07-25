@@ -72,7 +72,10 @@ ${css}
   background: color-mix(in srgb, var(--void) 78%, transparent);
   backdrop-filter: blur(2px);
   pointer-events: auto;
-  z-index: 10;
+  /* Above the game's own mode picker (z-index 20). The two are a sequence, not
+     rivals: read the controls, then choose what to play. Leave this below the
+     picker and the picker eats the taps meant for "Start throwing". */
+  z-index: 30;
 }
 
 #start[hidden] {
@@ -264,6 +267,14 @@ button {
 }
 
 #tools button:focus-visible { outline: 2px solid var(--beak); outline-offset: 2px; }
+
+/* Hide the tool pills while either card is up. They sit top-centre, which on a
+   short landscape screen is exactly where the mode card's own title goes, and
+   they are unclickable under the overlay anyway. */
+#app:has(#start:not([hidden])) #tools,
+#app:has(.mode-select:not([hidden])) #tools {
+  display: none;
+}
 </style>
 
 <div id="app">
@@ -282,7 +293,8 @@ button {
         <h1>Snowball Fight</h1>
         <p class="lede">
           Your left thumb moves. Your right thumb does everything else.
-          Three training dummies to knock over, and snow walls to build and wreck.
+          Next you'll pick a mode &mdash; <b>Practice</b> has training dummies and
+          no clock, so start there.
         </p>
       </div>
 

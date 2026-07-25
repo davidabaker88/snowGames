@@ -2,9 +2,10 @@
 
 A 3/4 top-down multiplayer snowball fight for the browser, built mobile-first.
 
-**Playable now:** move, pack a snowball by circling your thumb, throw it with a
-flick, set it down and pick it back up, knock over training dummies, and build or
-wreck snow walls. Single device, no server — see [Roadmap](#roadmap).
+**Playable now:** five game modes against bots — pack snowballs by circling your
+thumb, throw them with a flick, build and wreck snow walls, take the hill, steal
+the flag, or outlast a closing blizzard. Single device, no server — see
+[Roadmap](#roadmap).
 
 ## Running it
 
@@ -38,10 +39,13 @@ main WiFi network, not the guest one.
 
 | URL | What it does |
 | --- | --- |
-| `/` | Play |
+| `/` | Opens the mode picker |
+| `/?mode=teamWar` | Skip the picker and start a mode (see [Game modes](#game-modes)) |
+| `/?mode=sandbox` | Free play with training dummies — no score, no timer |
+| `/?bots=7` | Bot count, 0–9. Default 5. |
 | `/?skin=chicken` | Play as a chicken — the swappable-model proof |
 | `/?dev=rig` | **Rig Lab**: turntable and clip scrubber for inspecting skins |
-| `/?debug` | On-screen state overlay (tick, gesture state, pack progress) |
+| `/?debug` | On-screen state overlay (tick, gesture state, mode phase, scores) |
 
 ## Controls
 
@@ -82,6 +86,31 @@ clean circles — people naturally scrub, and refusing to reward it feels broken
 
 A circular **mouse drag** on the right half feeds the real gesture recognizer too,
 so the circle detection is exercised on desktop rather than bypassed.
+
+## Game modes
+
+Five modes plus a practice sandbox, all playable now against bots. The picker
+opens on load; the slider sets how many bots join.
+
+| Mode | How you win | The rule that makes it work |
+| --- | --- | --- |
+| **Practice** (`sandbox`) | You don't — it's free play with training dummies | No timer, no score, no bots |
+| **Last One Standing** | Be the last one alive | A **closing blizzard** damages anyone outside the ring. Without it, two campers stall the match forever. |
+| **Team Snowball War** | First team to 20 hits, or ahead at 5:00 | 4-second respawns, and you spawn **farthest from living enemies** |
+| **Capture the Flag** | 3 captures, or ahead at 6:00 | Your own flag must be **home** to score, so you can't just trade steals |
+| **King of the Hill** | Hold the centre for 60 points | Capture progress comes from `attackers − defenders`, so numbers matter |
+| **Fort Defense** | Blue holds the fort to 4:00; Red wins by taking it *once* | 45-second build phase where **only Blue may build**, 40 walls to Red's 6, and no damage until it ends |
+
+Fort Defense is not a fifth mode implementation — it is King of the Hill's file with
+different numbers (a different zone, asymmetric build budgets, asymmetric respawn
+timers, a long warm-up and a single-capture win). That's the payoff of putting mode
+rules behind an interface: the *second* mode of a family costs a config block.
+
+Bots are not a separate code path. A bot produces the same `InputFrame` a thumb
+does — move axes, aim, buttons, pack delta — and its objective comes from the mode
+itself via `mode.botObjective`, so a new mode gets bots that understand it without
+touching the bot. It also means the automated tests play real matches: one check
+runs a full bot match in a browser and asserts somebody actually wins.
 
 ## How it's put together
 
@@ -142,6 +171,27 @@ the hand at height 40 and arcs to ~56 before falling, so against a 48-high wall 
 is a **mid-range band where throws sail clean over it**, with connecting zones at
 point blank and at longer range. Range is a real tactical variable, not just power.
 
+### The mode framework
+
+Adding a mode is one file plus one line in `shared/src/modes/registry.ts`. Nothing
+in the simulation, the renderer or the HUD needs to know it exists. Two rules make
+that true:
+
+**Modes are stateless.** A `GameMode` is a bag of hooks — `init`, `assignTeam`,
+`spawnPoint`, `onTick`, `onPlayerHit`, `onEliminate`, `onBuildRequest`, `checkWin`,
+`hud`, `botObjective` — and every one of them reads the world it's handed. Nothing
+mutable lives on the mode object, so the same instance can drive several worlds and
+a mode can never quietly desync from the state it's judging.
+
+**`ModeCtx` is the only mutation channel.** Modes score, damage, eliminate, respawn
+and spawn through it and never reach into world arrays. That's one place to audit
+when something changes state it shouldn't, instead of six.
+
+**The HUD is pure data.** A mode fills in a `ModeHud` struct — title, headline, sub,
+team scores — and the client draws it. No mode contains a line of canvas code, and a
+new mode gets a working scoreboard for free. When a widget can't be expressed, the
+fix is to extend `ModeHud`, not to hand a mode a drawing context.
+
 ## Tests
 
 ```bash
@@ -153,7 +203,8 @@ pnpm verify        # drives the real game in headless Chromium, writes screensho
 `pnpm verify` is the interesting one: it launches Chromium, dispatches real
 `PointerEvent`s through the actual gesture recognizer, and asserts the game
 responds — packing, throwing, placing, picking up, hitting a dummy, building a wall,
-chipping one down, and swapping skins.
+chipping one down, swapping skins, booting every game mode, and playing a bot match
+through to a winner.
 A test that set `packProgress = 2.5` directly would prove nothing about whether
 circling works.
 
@@ -184,19 +235,18 @@ Notable regression guards, each one written because the bug actually happened:
 | Phase | Work | State |
 | --- | --- | --- |
 | 4 | Snow walls: build and destroy | **done** |
-| 5 | Pluggable game-mode framework + the four game modes | next |
+| 5 | Pluggable game-mode framework + the four game modes + bots | **done** |
 | — | Networked multiplayer and a game server | **not being built** |
 
 **No server.** That is a deliberate decision, not an omission. It means there is no
 networked multiplayer: no online play, and no same-WiFi play between devices. Each
 device runs its own game.
 
-What that does *not* rule out is same-device play against bots, and all four game
-modes on top of it. The groundwork is already here and tested: `step()` is a pure
-function that a host can drive, bots are designed to emit the same `InputFrame`
-structs a human does, and `shared/net/localTransport.ts` already carries messages
-in-process with configurable latency and loss. So modes are buildable without a
-line of server code.
+What that does *not* rule out is same-device play against bots, which is what all
+five modes above run on. The groundwork for networking is here anyway: `step()` is a
+pure function a host could drive, bots already emit the same `InputFrame` structs a
+human does, and `shared/net/localTransport.ts` carries messages in-process with
+configurable latency and loss.
 
 If networking is ever wanted, nothing here blocks it. `Transport` is bytes-only and
 assumes nothing about ordering or reliability, so a WebSocket server — or WebRTC, or

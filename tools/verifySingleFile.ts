@@ -68,6 +68,22 @@ async function main(): Promise<void> {
     await page.waitForTimeout(250);
     check('start card dismisses', !(await page.isVisible('#start')));
 
+    // The start card hands off to the game's own mode picker. If the two ever get
+    // their stacking wrong the picker swallows the taps meant for the card, so
+    // assert the handoff rather than assuming it.
+    check('the mode picker takes over', await page.isVisible('.mode-select'));
+    check(
+      'the tool pills are out of the picker\'s way',
+      !(await page.isVisible('#tools')),
+    );
+    await page.screenshot({ path: `${outDir}/single-01b-picker.png` });
+
+    // Practice for the gesture drive: dummies to hit, and no clock or bots to
+    // move the world underneath the assertions.
+    await page.click('.mode-btn[data-mode="sandbox"]');
+    await page.waitForTimeout(300);
+    check('picking Practice starts the game', !(await page.isVisible('.mode-select')));
+
     // Probe into the running game the same way the main verifier does.
     const probe = async (): Promise<{ tick: number; held: number; skin: string; flight: number }> =>
       page.evaluate(() => {
@@ -139,6 +155,46 @@ async function main(): Promise<void> {
 
     check('no runtime errors anywhere', errors.length === 0, errors.slice(0, 3).join(' | '));
     await ctx.close();
+
+    // ---- a competitive mode from the bundle ---------------------------------
+    // Practice exercises the gestures but not the mode framework: no teams, no
+    // bots, no win condition. Bots are also the most likely thing to be missing
+    // from a production bundle that tree-shook something it shouldn't have.
+    {
+      const c = await browser.newContext({
+        viewport: { width: 844, height: 390 },
+        deviceScaleFactor: 2,
+        hasTouch: true,
+        isMobile: true,
+      });
+      const p = await c.newPage();
+      const errs: string[] = [];
+      p.on('pageerror', (e) => errs.push(String(e)));
+      p.on('console', (m) => {
+        if (m.type() === 'error') errs.push(m.text());
+      });
+      await p.goto(pathToFileURL(resolve(file)).href, { waitUntil: 'load' });
+      await p.waitForTimeout(700);
+      await p.click('#go');
+      await p.waitForTimeout(150);
+      await p.click('.mode-btn[data-mode="teamWar"]');
+      await p.waitForTimeout(1600);
+
+      const s = await p.evaluate(() => {
+        const g = (window as unknown as { __snowGame: { debugState(): Record<string, unknown> } })
+          .__snowGame;
+        return g.debugState();
+      });
+      check(
+        'a competitive mode runs from the bundle',
+        s['modeId'] === 'teamWar' && (s['activePlayers'] as number) > 1,
+        `${String(s['modeId'])}, ${String(s['activePlayers'])} players, my team ${String(s['myTeam'])}`,
+      );
+      check('bots move on their own', (s['tick'] as number) > 30, `tick ${String(s['tick'])}`);
+      check('the competitive mode ran clean', errs.length === 0, errs.slice(0, 3).join(' | '));
+      await p.screenshot({ path: `${outDir}/single-06-teamwar.png` });
+      await c.close();
+    }
 
     // ---- the start card across real phone sizes ----------------------------
     // The primary action must be reachable WITHOUT scrolling on every one of

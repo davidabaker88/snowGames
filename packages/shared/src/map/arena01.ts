@@ -32,7 +32,14 @@ export interface MapDef {
   bounds: WorldBounds;
   props: Prop[];
   walls: WallRect[];
+  /** Free-for-all spawn points, also used by the practice arena. */
   spawns: { x: number; y: number }[];
+  /** Per-team spawn clusters, indexed by team id. */
+  teamSpawns: { x: number; y: number }[][];
+  /** Flag home positions, indexed by team id. */
+  flagBases: { x: number; y: number }[];
+  /** Capturable zones. Index 0 is the central hill, 1 is the fort core. */
+  zones: { x: number; y: number; radius: number; label: string }[];
   dummies: { x: number; y: number }[];
 }
 
@@ -60,6 +67,32 @@ export const MAP_ARENA01: MapDef = {
     { x: 500, y: 620 },
     { x: 500, y: 110 },
   ],
+  // Opposite ends of the arena, so team modes have a real distance to cross.
+  teamSpawns: [
+    [
+      { x: 120, y: 220 },
+      { x: 120, y: 360 },
+      { x: 120, y: 500 },
+    ],
+    [
+      { x: 880, y: 220 },
+      { x: 880, y: 360 },
+      { x: 880, y: 500 },
+    ],
+  ],
+
+  flagBases: [
+    { x: 90, y: 360 },
+    { x: 910, y: 360 },
+  ],
+
+  zones: [
+    // 0: the central hill, equidistant from both team spawns.
+    { x: 500, y: 360, radius: 95, label: 'Hill' },
+    // 1: the fort core, sitting in team 0's half so they have something to defend.
+    { x: 210, y: 360, radius: 80, label: 'Fort' },
+  ],
+
   dummies: [
     { x: 420, y: 240 },
     { x: 560, y: 200 },

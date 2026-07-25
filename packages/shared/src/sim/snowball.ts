@@ -39,6 +39,7 @@ import { clamp01, invLerp, lerp } from '../math/angle.js';
 import { makeSweepResult, sweptCircleHit } from './collision.js';
 import { ActionState, BallSize, BallState, SimEventType } from './types.js';
 import { freeBall, pushEvent, type Ball, type Player, type World } from './world.js';
+import { createModeCtx } from '../modes/ctx.js';
 import {
   damageWall,
   makeWallDamageResult,
@@ -314,8 +315,14 @@ function clampBallToBounds(w: World, b: Ball): void {
 function applyHit(w: World, b: Ball, victim: Player, x: number, y: number, z: number): void {
   const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
   const scale = 0.55 + 0.45 * invLerp(IMPACT_SPEED_MIN, IMPACT_SPEED_MAX, speed);
-  const damage = ballBaseDamage(b.size) * scale;
 
+  // Ask the mode first. It may veto the hit entirely (friendly fire) or scale it
+  // to nothing (warmup), and a vetoed ball should pass through rather than vanish
+  // -- otherwise teammates can body-block for each other by accident.
+  const verdict = w.mode.onPlayerHit(w, victim, b.owner);
+  if (!verdict.allow) return;
+
+  const damage = ballBaseDamage(b.size) * scale * verdict.damageMul;
   victim.hp -= damage;
   victim.staggerAmount = Math.min(1, victim.staggerAmount + 0.6 + scale * 0.4);
 
@@ -334,19 +341,21 @@ function applyHit(w: World, b: Ball, victim: Player, x: number, y: number, z: nu
   void STAGGER_TICKS;
 
   pushEvent(w, SimEventType.Hit, victim.id, x, y, z, damage, b.owner);
+  freeBall(w, b);
 
   if (victim.hp <= 0) {
     victim.hp = 0;
     if (victim.isDummy) {
-      // Dummies are a training aid, not a mode: knock them over and reset.
+      // Dummies are a training aid, not a participant: knock them over and reset.
       victim.respawnTicks = 1;
-    } else {
       victim.alive = false;
       victim.action = ActionState.Eliminated;
       victim.actionTicks = 0;
+      pushEvent(w, SimEventType.Eliminated, victim.id, victim.x, victim.y, 0, 0, b.owner);
+    } else {
+      // Through the mode, so it can award the point, drop a carried flag and
+      // decide whether this player comes back.
+      createModeCtx(w).eliminate(victim, b.owner);
     }
-    pushEvent(w, SimEventType.Eliminated, victim.id, victim.x, victim.y, 0, 0, b.owner);
   }
-
-  freeBall(w, b);
 }

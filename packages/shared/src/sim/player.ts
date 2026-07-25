@@ -148,7 +148,9 @@ function speedMultiplier(p: Player): number {
     case ActionState.Stagger:
       return 0.15;
     default:
-      return p.heldBall >= 0 ? CARRY_SPEED_MUL : 1;
+      // Carrying a flag slows you exactly like carrying a snowball does, so
+      // grabbing an objective is a commitment rather than a free action.
+      return p.heldBall >= 0 || p.carryingFlag >= 0 ? CARRY_SPEED_MUL : 1;
   }
 }
 
@@ -221,7 +223,10 @@ export function stepPlayer(w: World, p: Player, input: InputFrame): void {
     } else if (hasButton(input, Button.Build) && p.heldBall >= 0) {
       // Building spends the held snowball, so packing feeds both offence and
       // defence out of one resource -- no separate economy to explain.
-      if (buildTargetTile(w, p) >= 0) setAction(p, ActionState.Building);
+      // The mode gets a veto: build budgets and Fort Defense's build phase.
+      if (buildTargetTile(w, p) >= 0 && w.mode.onBuildRequest(w, p)) {
+        setAction(p, ActionState.Building);
+      }
     } else if (hasButton(input, Button.Place) && p.heldBall >= 0) {
       setAction(p, ActionState.Placing);
     } else if (hasButton(input, Button.Pickup) && p.heldBall < 0) {
@@ -433,6 +438,7 @@ function doBuild(w: World, p: Player): void {
   const tier = buildAt(w.walls, i, BUILD_HP_PER_BALL);
   p.heldBall = -1;
   freeBall(w, b);
+  if (p.buildsRemaining > 0) p.buildsRemaining--;
 
   pushEvent(
     w,

@@ -15,6 +15,9 @@
 import {
   ActionState,
   BallState,
+  FLAG_RETURN_TICKS,
+  TEAM_COLORS,
+  TEAM_NONE,
   PLAYER_HEIGHT,
   PLAYER_RADIUS,
   Y_SQUASH,
@@ -45,6 +48,13 @@ import {
 } from './projection.js';
 import { fadeDecals, stampFootprint, type Terrain } from './terrain.js';
 import { drawAimPreview } from './aimPreview.js';
+import {
+  drawCarriedFlag,
+  drawFlag,
+  drawObjectiveMarkers,
+  drawRing,
+  drawZone,
+} from './objectives.js';
 import {
   collectWallTiles,
   drawBuildGhost,
@@ -110,6 +120,10 @@ export class Renderer {
     ctx.clearRect(0, 0, vp.width, vp.height);
     this.drawTerrain(ctx, o);
 
+    // Zones are markings ON the ground, so they draw before anything standing on
+    // them -- otherwise a capture zone paints over the players contesting it.
+    for (const z of w.zones) drawZone(ctx, z, cam, vp, o.time);
+
     // ---- shadows, one pass -------------------------------------------------
     ctx.save();
     for (const p of w.players) {
@@ -117,6 +131,11 @@ export class Renderer {
       if (!isVisible(p.x, p.y, cam, vp)) continue;
       const skin = getSkin(p.skinId);
       this.drawShadow(ctx, o, p.x, p.y, 0, skin.shadow.rx, skin.shadow.ry);
+      // A coloured ring at the feet. Recolouring the character itself would fight
+      // the swappable-skin system, and a ring reads better at gameplay zoom anyway.
+      if (p.team !== TEAM_NONE && p.alive) {
+        this.drawTeamRing(ctx, o, p, p.id === o.localPlayerId);
+      }
     }
     for (const b of w.balls) {
       if (!b.alive || b.state === BallState.Held) continue;
@@ -181,7 +200,14 @@ export class Renderer {
     });
 
     // ---- overlays ----------------------------------------------------------
+    for (const f of w.flags) drawFlag(ctx, f, cam, vp, o.time, FLAG_RETURN_TICKS);
+
     o.particles.draw(ctx, cam, vp);
+
+    // The blizzard sits above the world but below the HUD: it is weather, and it
+    // has to visibly cover the ground you cannot stand on.
+    drawRing(ctx, w.ring, cam, vp, o.time);
+    drawObjectiveMarkers(ctx, w, cam, vp);
 
     if (o.buildTarget >= 0) {
       drawBuildGhost(ctx, w.walls, o.buildTarget, cam, vp, o.showAim);
@@ -245,6 +271,27 @@ export class Renderer {
     );
     ctx.fill();
     ctx.globalAlpha = 1;
+  }
+
+  /** Team colour ring at a player's feet. */
+  private drawTeamRing(ctx: CanvasRenderingContext2D, o: RenderOpts, p: Player, isLocal: boolean): void {
+    const { cam, vp } = o;
+    ctx.save();
+    ctx.strokeStyle = TEAM_COLORS[p.team] ?? '#c8d6e6';
+    ctx.globalAlpha = isLocal ? 0.95 : 0.7;
+    ctx.lineWidth = Math.max(1.5, (isLocal ? 2.6 : 1.8) * cam.zoom);
+    ctx.beginPath();
+    ctx.ellipse(
+      worldToScreenX(p.x, cam, vp),
+      worldToScreenY(p.y, 0, cam, vp),
+      14 * cam.zoom,
+      14 * cam.zoom * Y_SQUASH,
+      0,
+      0,
+      Math.PI * 2,
+    );
+    ctx.stroke();
+    ctx.restore();
   }
 
   private drawProp(ctx: CanvasRenderingContext2D, o: RenderOpts, prop: Prop): void {
@@ -371,6 +418,22 @@ export class Renderer {
 
     drawCharacter(ctx, rt.skeleton, rt.solved, drawOpts);
 
+    // A carried flag rides above its carrier, which is what makes a runner
+    // identifiable at a glance in Capture the Flag.
+    if (p.carryingFlag >= 0) {
+      const f = o.world.flags[p.carryingFlag];
+      if (f) {
+        drawCarriedFlag(
+          ctx,
+          drawOpts.screenX,
+          worldToScreenY(p.y, PLAYER_HEIGHT * 0.9, cam, vp),
+          f.team,
+          cam.zoom,
+          o.time,
+        );
+      }
+    }
+
     // A held ball rides the skin's declared hold bone.
     if (p.heldBall >= 0) {
       const b = o.world.balls[p.heldBall];
@@ -422,7 +485,13 @@ export class Renderer {
   private drawNameplates(ctx: CanvasRenderingContext2D, o: RenderOpts): void {
     const { world: w, cam, vp } = o;
     ctx.textAlign = 'center';
-    ctx.font = `${Math.round(11 * Math.max(1, cam.zoom))}px system-ui, sans-serif`;
+
+    // Nameplates are UI, not world geometry, so their size is capped rather than
+    // tracking zoom outright. A desktop window is ~2.7x zoom, which at the raw
+    // rate drew 30px names that collided with each other and with the HUD.
+    // Scaling a little keeps them anchored to their owner without shouting.
+    const plateScale = Math.max(1, Math.min(1.35, cam.zoom));
+    ctx.font = `${Math.round(11 * plateScale)}px system-ui, sans-serif`;
 
     for (const p of w.players) {
       if (!p.active || !isVisible(p.x, p.y, cam, vp)) continue;
@@ -435,7 +504,7 @@ export class Renderer {
       const maxHp = p.isDummy ? 60 : 100;
       if (p.hp < maxHp && p.alive) {
         const bw = PLAYER_RADIUS * 2.2 * cam.zoom;
-        const bh = 3.5 * cam.zoom;
+        const bh = 3.5 * plateScale;
         ctx.fillStyle = 'rgba(20,30,45,0.55)';
         ctx.fillRect(x - bw / 2, y, bw, bh);
         ctx.fillStyle = p.hp > maxHp * 0.4 ? '#6ddf8f' : '#ef6a52';
@@ -444,7 +513,7 @@ export class Renderer {
 
       if (p.isDummy) continue;
       ctx.fillStyle = 'rgba(15,25,40,0.7)';
-      ctx.fillText(p.name, x, y - 4 * cam.zoom);
+      ctx.fillText(p.name, x, y - 4 * plateScale);
     }
     ctx.textAlign = 'left';
   }
