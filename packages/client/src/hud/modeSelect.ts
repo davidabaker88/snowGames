@@ -13,11 +13,27 @@ import { MODES, MODE_ORDER, type ModeId } from '@snow/shared';
 
 export interface ModeSelectHandlers {
   onPick(id: ModeId, bots: number): void;
+  /**
+   * The same choice, but played with other devices.
+   *
+   * The mode is chosen BEFORE the lobby rather than in it, because a host needs to know
+   * what it is hosting before it has a room code to advertise -- and a joiner does not
+   * choose at all, since the host's match is already running.
+   */
+  onPlayTogether(id: ModeId, bots: number): void;
 }
 
 export class ModeSelect {
   private root: HTMLDivElement;
   private botCount = 5;
+  /**
+   * Which mode "Play with other devices" will use.
+   *
+   * Tracked by highlighting rather than by a second list: a player who taps a mode
+   * expects that to be their choice, so the online button follows the last one they
+   * touched instead of asking again.
+   */
+  private lastPicked: ModeId = 'teamWar';
 
   constructor(
     parent: HTMLElement,
@@ -79,8 +95,17 @@ export class ModeSelect {
       btn.addEventListener('click', () => {
         // Practice has no opponents by design; everything else fills with bots.
         const bots = m.config.suggestedBots > 0 ? this.botCount : 0;
+        this.lastPicked = id;
         this.hide();
         this.handlers.onPick(id, bots);
+      });
+      // Hovering or focusing also aims the online button, so choosing a mode and then
+      // choosing "with other devices" does what it looks like it does.
+      btn.addEventListener('pointerenter', () => {
+        this.lastPicked = id;
+      });
+      btn.addEventListener('focus', () => {
+        this.lastPicked = id;
       });
       list.appendChild(btn);
     }
@@ -108,6 +133,19 @@ export class ModeSelect {
     row.appendChild(label);
     row.appendChild(slider);
     card.appendChild(row);
+
+    // Online play. Below the modes because picking what to play comes first, and
+    // Practice deliberately has no online variant -- there is nobody to practise with.
+    const together = document.createElement('button');
+    together.type = 'button';
+    together.className = 'mode-together';
+    together.dataset['action'] = 'play-together';
+    together.textContent = 'Play with other devices';
+    together.addEventListener('click', () => {
+      const id = this.lastPicked;
+      this.handlers.onPlayTogether(id, MODES[id].config.suggestedBots > 0 ? this.botCount : 0);
+    });
+    card.appendChild(together);
 
     this.root.appendChild(card);
   }

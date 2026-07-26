@@ -49,7 +49,19 @@ export interface Transport {
   readonly id: string;
 
   connect(): Promise<void>;
-  send(data: Uint8Array): void;
+  /**
+   * Send bytes.
+   *
+   * `reliable` is a DELIVERY HINT, not game vocabulary -- rule 1 still holds, and a
+   * transport that cannot honour it may ignore it. It exists because WebRTC can offer
+   * an unreliable unordered channel, and for the hot path that is strictly better: a
+   * reliable ordered channel head-of-line blocks every later snapshot behind a
+   * retransmit of one that is already obsolete.
+   *
+   * Defaults to `true`, so a caller that has not thought about it gets the safe
+   * behaviour rather than silent loss.
+   */
+  send(data: Uint8Array, reliable?: boolean): void;
   close(code?: number, reason?: string): void;
 
   readonly onOpen: Signal<void>;

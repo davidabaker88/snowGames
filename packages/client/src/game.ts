@@ -59,9 +59,18 @@ import { ParticleSystem } from './render/particles.js';
 import { drawHud, type HudModel } from './hud/hud.js';
 import { drawModeHud, drawSpectatorNotice } from './hud/modeHud.js';
 import { ModeSelect } from './hud/modeSelect.js';
-import { RateMeter, drawNetDebug, netDebugHeight } from './hud/netDebug.js';
+import { RateMeter, drawNetDebug } from './hud/netDebug.js';
 import { NetSession } from './net/netSession.js';
+import { Lobby } from './hud/lobby.js';
+import { HostedRoom, joinRoom, type JoinedRoom, type RoomStatus } from './net/room.js';
+import { HttpSignalling } from './net/httpSignalling.js';
 import type { Camera, Viewport } from './render/projection.js';
+
+/** Turn whatever came back from signalling into something a player can act on. */
+function describeError(e: unknown): string {
+  if (e instanceof Error && e.message) return e.message;
+  return 'could not reach the signalling server';
+}
 
 /** Safe-area top inset, read from the CSS variable the stylesheet publishes. */
 function safeTop(): number {
@@ -88,6 +97,8 @@ export interface GameOptions {
   netDebug?: boolean;
   /** Injected latency and loss, so the netcode can be felt rather than read about. */
   link?: LinkConditions;
+  /** Signalling origin. Empty means no online play, which is a valid configuration. */
+  signalUrl?: string;
 }
 
 export class Game {
@@ -125,6 +136,14 @@ export class Game {
   private readonly rates = new RateMeter();
   private netStarted = false;
 
+  private lobby: Lobby;
+  /** Set when this device is hosting for others over WebRTC. */
+  private room: HostedRoom | null = null;
+  /** Set when this device joined somebody else's room. */
+  private guest: JoinedRoom | null = null;
+  private pendingModeId: ModeId = 'teamWar';
+  private pendingBots = 3;
+
   constructor(private readonly opts: GameOptions) {
     const canvas = opts.canvas;
     const ctx = canvas.getContext('2d', { alpha: false });
@@ -145,8 +164,24 @@ export class Game {
     // Built before the loop starts, so there is always a world to render.
     this.world = this.buildMatch(this.currentModeId, this.currentBots);
 
-    this.modeSelect = new ModeSelect(document.getElementById('hud') ?? document.body, {
+    const hudRoot = document.getElementById('hud') ?? document.body;
+    this.modeSelect = new ModeSelect(hudRoot, {
       onPick: (id, bots) => this.startMode(id, bots),
+      onPlayTogether: (id, bots) => {
+        // Remember what they picked, because the lobby comes BEFORE the match is built:
+        // a joiner's mode comes from the host, and a host's from this choice.
+        this.pendingModeId = id;
+        this.pendingBots = bots;
+        this.modeSelect.hide();
+        this.lobby.showChoice();
+        this.lobby.show();
+      },
+    });
+    this.lobby = new Lobby(hudRoot, {
+      onHost: () => void this.hostRoom(),
+      onJoin: (code) => void this.joinAsGuest(code),
+      onStart: () => this.startHostedMatch(),
+      onCancel: () => this.leaveOnline(),
     });
     if (!opts.modeId) this.modeSelect.show();
 
@@ -172,6 +207,10 @@ export class Game {
    */
   private buildMatch(modeId: ModeId, bots: number): World {
     if (this.opts.networked) return this.buildHostedMatch(modeId, bots);
+    if (this.room || this.guest) {
+      // Online play owns the world; rebuilding it here would discard the host.
+      return this.session?.world ?? this.world;
+    }
     const mode = getMode(modeId);
     const w = createWorld(0x51e161, MAP_ARENA01.bounds, mode);
     applyMap(w, MAP_ARENA01);
@@ -223,7 +262,7 @@ export class Game {
     // Bots live on the HOST in this mode. Leaving stale brains here would have them
     // driving player ids in a world they no longer belong to.
     this.brains = [];
-    this.session = new NetSession({
+    this.session = NetSession.solo({
       modeId,
       bots,
       skinId: this.opts.skinId,
@@ -244,6 +283,127 @@ export class Game {
     this.terrain = createTerrain(MAP_ARENA01.bounds, 1);
     snapCamera(this.cam, this.me.x, this.me.y);
     this.showHint(getMode(modeId).blurb, 6);
+  }
+
+  // ---- online play -------------------------------------------------------
+
+  private signalling(): HttpSignalling {
+    return new HttpSignalling({ baseUrl: this.opts.signalUrl ?? '' });
+  }
+
+  /**
+   * Host a room over WebRTC.
+   *
+   * The hosting player plays through the same `NetSession` a solo hosted match uses --
+   * a local transport pair to its own `GameHost` -- while remote players arrive as
+   * WebRTC transports on the same host. So the host is a client of itself, and runs
+   * exactly the code every other player runs, prediction included. A special-cased
+   * "the host just steps the world" path would be exercised by one player per match,
+   * which is where the bugs nobody can reproduce come from.
+   */
+  private async hostRoom(): Promise<void> {
+    this.teardownOnline();
+    const onStatus = (s: RoomStatus): void => this.lobby.setStatus(s, this.onlineRoster());
+    try {
+      const room = new HostedRoom({
+        signalling: this.signalling(),
+        modeId: this.pendingModeId,
+        bots: this.pendingBots,
+        seed: 0x51e161,
+        hostName: 'Host',
+        onStatus,
+      });
+      this.room = room;
+
+      // The local player attaches to this host through an in-process pair, so the host
+      // has a client too.
+      const session = NetSession.attachTo(room.host, this.opts.skinId, this.opts.link);
+      this.session = session;
+      this.netStarted = false;
+      this.world = session.world;
+
+      await room.open();
+    } catch (e) {
+      this.failOnline(e);
+    }
+  }
+
+  /** Join somebody else's room. */
+  private async joinAsGuest(code: string): Promise<void> {
+    this.teardownOnline();
+    try {
+      const joined = await joinRoom({
+        signalling: this.signalling(),
+        code,
+        name: 'Player',
+        skinId: this.opts.skinId,
+        onStatus: (s) => this.lobby.setStatus(s),
+      });
+      this.guest = joined;
+      const session = NetSession.fromClient(joined.client);
+      this.session = session;
+      this.world = session.world;
+      this.netStarted = true;
+      this.lobby.hide();
+      this.showHint('Joined. Waiting for the host to start.', 5);
+    } catch (e) {
+      this.failOnline(e);
+    }
+  }
+
+  /**
+   * Report a failed host or join, and make sure the report is actually on screen.
+   *
+   * The `show()` is load-bearing. An earlier version tore down through `leaveOnline`,
+   * which returns to the mode picker -- so the failure text rendered into a panel that
+   * had just been hidden, and pressing Host with no signalling server flipped back to
+   * the picker with no explanation at all.
+   */
+  private failOnline(e: unknown): void {
+    this.teardownOnline();
+    this.lobby.setStatus({ kind: 'failed', reason: describeError(e) });
+    this.lobby.show();
+  }
+
+  /** Host only: begin the match everybody is waiting in the lobby for. */
+  private startHostedMatch(): void {
+    if (!this.room || !this.session) return;
+    this.room.host.start();
+    this.netStarted = true;
+    this.lobby.hide();
+    this.showHint(getMode(this.pendingModeId).blurb, 5);
+  }
+
+  private onlineRoster(): string[] {
+    return (this.session?.client.roster ?? []).filter((r) => !r.isBot).map((r) => r.name);
+  }
+
+  /**
+   * Drop any online session WITHOUT touching which screen is showing.
+   *
+   * Separate from `leaveOnline` deliberately: starting a host or a join needs to clear
+   * whatever came before, but must not navigate -- the lobby is mid-flow and still has
+   * something to say.
+   */
+  private teardownOnline(): void {
+    this.room?.close();
+    this.room = null;
+    this.guest?.close();
+    this.guest = null;
+    if (this.session) {
+      this.session.dispose();
+      this.session = null;
+    }
+  }
+
+  /** Give up on online play and go back to the picker. */
+  private leaveOnline(): void {
+    this.teardownOnline();
+    this.lobby.hide();
+    if (!this.opts.networked) {
+      this.world = this.buildMatch(this.currentModeId, this.currentBots);
+      this.modeSelect.show();
+    }
   }
 
   /** Re-run the current mode. */
@@ -531,7 +691,7 @@ export class Game {
         info: d,
         downPerSec: this.rates.downPerSec,
         upPerSec: this.rates.upPerSec,
-        hostTick: this.session.host.world.tick,
+        hostTick: this.session.hostTick,
         clientTick: this.session.client.confirmed.tick,
       });
     }
@@ -636,7 +796,7 @@ export class Game {
         ? {
             joined: this.session.client.joined,
             localPlayerId: this.session.localPlayerId,
-            hostTick: this.session.host.world.tick,
+            hostTick: this.session.hostTick,
             confirmedTick: this.session.client.confirmed.tick,
             rttMs: this.session.debug.rttMs,
             interpDelayMs: this.session.debug.interpDelayMs,

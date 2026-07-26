@@ -1,7 +1,14 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/shared" },
-    { "path": "./packages/client" }
+    {
+      "path": "./packages/shared"
+    },
+    {
+      "path": "./packages/client"
+    },
+    {
+      "path": "./workers/signal"
+    }
   ]
 }

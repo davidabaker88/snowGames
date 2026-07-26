@@ -17,3 +17,23 @@ declare const queueMicrotask: (fn: () => void) => void;
 
 /** Opaque: Node returns a Timeout object, browsers return a number. */
 declare type TimerHandle = number | { readonly __timerBrand: 'TimerHandle' };
+
+/**
+ * WHATWG Encoding, used by the JSON cold path of the protocol.
+ *
+ * These are genuine globals in every runtime this package targets -- browsers, Node
+ * since v11, and Cloudflare Workers -- but they belong to the Encoding standard rather
+ * than to ECMAScript, so `lib: ["ES2022"]` does not declare them. Pulling in "DOM" to
+ * get them would hand this package `window` and `document` as well, which is exactly
+ * what the tsconfig is arranged to prevent. Declaring the two of them is the narrow fix.
+ */
+declare class TextEncoder {
+  encode(input?: string): Uint8Array;
+  readonly encoding: string;
+}
+
+declare class TextDecoder {
+  constructor(label?: string, options?: { fatal?: boolean; ignoreBOM?: boolean });
+  decode(input?: ArrayBuffer | ArrayBufferView): string;
+  readonly encoding: string;
+}

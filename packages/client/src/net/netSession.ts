@@ -1,22 +1,21 @@
 /**
- * A whole networked match, in one tab.
+ * One end of a networked match, from this device's point of view.
  *
- * Runs a real `GameHost` and a real `NetClient` connected by `createLocalPair()`.
- * Nothing here is a simulation of networking: it is the netcode, with the bytes
- * taking a shortcut instead of a socket. That makes the entire authoritative path --
- * handshake, snapshots, delta encoding, prediction, reconciliation, interpolation,
- * lag compensation -- something you can look at on a phone, with `?netdebug=1` to
- * read the numbers.
+ * Three shapes, and the reason there are exactly three is worth stating:
  *
- * Why this is opt-in via `?net=1` rather than the default: single-device play against
- * bots does not need a network, and routing it through one would add a round trip and
- * a class of failure for no benefit to the player. The value of this path is that it
- * exercises the netcode in a real browser under real frame timing, and it is the
- * shape the WebRTC transport will drop into -- at which point it becomes the only
- * path, because then there genuinely is a network.
+ *  - `solo` -- a host and a client in this tab, joined by `createLocalPair()`. Exercises
+ *    the whole authoritative path with no network involved, which is what `?net=1` runs.
+ *  - `hosting` -- a client attached to a host that ALSO serves remote peers over WebRTC.
+ *  - `guest` -- a client and nothing else; the host is somebody else's phone.
  *
- * The transport is the ONLY thing that changes when that happens. `createLocalPair()`
- * becomes a DataChannel pair; everything below stays as it is.
+ * Notice that the hosting player is a client of their own host, over a local transport
+ * pair. That is not a convenience. It means the person hosting runs exactly the code
+ * every other player runs, prediction and reconciliation included. A "the host just
+ * steps the world directly" shortcut would create a path exercised by one player per
+ * match and by no test, which is precisely where bugs nobody can reproduce live.
+ *
+ * The only thing that differs between a guest on WiFi and a guest across the internet is
+ * which `Transport` was handed in. Nothing in this file knows the difference.
  */
 
 import {
@@ -34,30 +33,43 @@ import {
   type World,
 } from '@snow/shared';
 
-export interface NetSessionOptions {
-  modeId: string;
-  bots: number;
-  skinId: string;
-  seed: number;
-  /** Injected latency and loss, for feeling the netcode rather than reading about it. */
-  link?: LinkConditions;
+export function makeWorldFactory(modeId: string, seed: number): () => World {
+  return (): World => {
+    const w = createWorld(seed, MAP_ARENA01.bounds, getMode(modeId));
+    applyMap(w, MAP_ARENA01);
+    return w;
+  };
 }
 
 export class NetSession {
-  readonly host: GameHost;
-  readonly client: NetClient;
-
   private readonly pendingEvents: SimEvent[] = [];
   private disposed = false;
+  private didStart = false;
 
-  constructor(private readonly opts: NetSessionOptions) {
-    const factory = (): World => {
-      const w = createWorld(opts.seed, MAP_ARENA01.bounds, getMode(opts.modeId));
-      applyMap(w, MAP_ARENA01);
-      return w;
-    };
+  private constructor(
+    /** Null for a guest: somebody else is authoritative. */
+    readonly host: GameHost | null,
+    readonly client: NetClient,
+    /** True when this session created the host and is responsible for advancing it. */
+    private readonly ownsHost: boolean,
+  ) {
+    // Buffered rather than dispatched straight through, because events arrive on the
+    // transport's timing and the renderer wants them on a tick boundary.
+    client.onEvents.on((evs) => {
+      for (const e of evs) this.pendingEvents.push(e);
+    });
+  }
 
-    this.host = new GameHost({
+  /** A host and a client in this tab, for `?net=1` and for tests. */
+  static solo(opts: {
+    modeId: string;
+    bots: number;
+    skinId: string;
+    seed: number;
+    link?: LinkConditions;
+  }): NetSession {
+    const factory = makeWorldFactory(opts.modeId, opts.seed);
+    const host = new GameHost({
       createWorld: factory,
       modeId: opts.modeId,
       seed: opts.seed,
@@ -65,45 +77,47 @@ export class NetSession {
       maxPlayers: 8,
       now: () => performance.now(),
     });
-
-    const [clientSide, hostSide] = createLocalPair(opts.link ?? {});
-    this.host.accept(hostSide);
-    void hostSide.connect();
-
-    this.client = new NetClient({
-      transport: clientSide,
-      createWorld: factory,
-      name: 'You',
-      skinId: opts.skinId,
-      now: () => performance.now(),
-    });
-
-    // Buffered rather than dispatched, because events arrive on the transport's
-    // timing and the renderer wants them on a tick boundary.
-    this.client.onEvents.on((evs) => {
-      for (const e of evs) this.pendingEvents.push(e);
-    });
-
-    void this.client.connect();
+    const client = attachClient(host, opts.skinId, factory, opts.link);
+    return new NetSession(host, client, true);
   }
 
   /**
-   * Start the match once the client has actually joined.
+   * A client for a host this device is running for others.
    *
-   * Order matters: `GameHost.start()` fills the remaining slots with bots, so the
-   * human has to be in before it runs or the bots take the low slots and the local
-   * player is not player zero.
+   * The host is NOT owned here -- `HostedRoom` created it and owns its lifetime -- but it
+   * still has to be advanced, and this session is what has a frame loop. Hence
+   * `ownsHost: true` for advancing while the room owns teardown.
    */
+  static attachTo(host: GameHost, skinId: string, link?: LinkConditions): NetSession {
+    const client = attachClient(host, skinId, makeWorldFactory('sandbox', 0), link);
+    return new NetSession(host, client, true);
+  }
+
+  /** A guest. Somebody else's phone is authoritative. */
+  static fromClient(client: NetClient): NetSession {
+    return new NetSession(null, client, false);
+  }
+
   get readyToStart(): boolean {
     return this.client.joined;
   }
 
+  /**
+   * Begin the match.
+   *
+   * Only meaningful where this end owns a host; a guest waits to be told. Idempotent, so
+   * a caller can check "has it started" every frame instead of remembering.
+   *
+   * The idempotence is tracked with a FLAG, not by looking at the host's tick. The host
+   * begins ticking the moment it exists -- it has to, or the handshake never completes --
+   * so a `tick > 0` guard is already true by the time the first client has joined, and
+   * `start()` would return early forever. The visible symptom was a hosted match that
+   * ran perfectly and simply had no bots in it.
+   */
   start(): void {
-    this.host.start();
-  }
-
-  get started(): boolean {
-    return this.host.world.tick > 0;
+    if (!this.ownsHost || this.didStart) return;
+    this.didStart = true;
+    this.host?.start();
   }
 
   /** What to render: the predicted world, which includes local input immediately. */
@@ -124,15 +138,20 @@ export class NetSession {
     return this.client.renderOffset;
   }
 
+  /** Host tick, or the client's confirmed tick when there is no local host. */
+  get hostTick(): number {
+    return this.host?.world.tick ?? this.client.confirmed.tick;
+  }
+
   /**
-   * Advance both ends and drain this frame's events.
+   * Advance this end and drain the frame's events.
    *
-   * Host first: it is the thing being waited on, and stepping it before the client
-   * shaves one tick off how long the client's input takes to be reflected.
+   * Host first where there is one: it is the thing being waited on, so stepping it
+   * before the client shaves a tick off how long local input takes to come back.
    */
   advance(frame: InputFrame): readonly SimEvent[] {
     if (this.disposed) return EMPTY;
-    this.host.advance();
+    if (this.ownsHost) this.host?.advance();
     this.client.advance(frame);
 
     if (this.pendingEvents.length === 0) return EMPTY;
@@ -145,6 +164,27 @@ export class NetSession {
     this.disposed = true;
     this.client.close();
   }
+}
+
+/** Wire a client to a host through an in-process transport pair. */
+function attachClient(
+  host: GameHost,
+  skinId: string,
+  factory: () => World,
+  link?: LinkConditions,
+): NetClient {
+  const [clientSide, hostSide] = createLocalPair(link ?? {});
+  host.accept(hostSide);
+  void hostSide.connect();
+  const client = new NetClient({
+    transport: clientSide,
+    createWorld: factory,
+    name: 'You',
+    skinId,
+    now: () => performance.now(),
+  });
+  void client.connect();
+  return client;
 }
 
 const EMPTY: readonly SimEvent[] = [];

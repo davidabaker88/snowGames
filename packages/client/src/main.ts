@@ -2,6 +2,7 @@ import './styles.css';
 import { DEFAULT_SKIN_ID, isModeId, skinIds, type ModeId } from '@snow/shared';
 import { Game } from './game.js';
 import { startRigLab } from './dev/rigLab.js';
+import { startRtcLab } from './dev/rtcLab.js';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('game') as HTMLCanvasElement | null;
@@ -12,6 +13,10 @@ if (!canvas) throw new Error('#game canvas missing');
 // how the chicken skin was validated without engine changes.
 if (params.get('dev') === 'rig') {
   startRigLab(canvas, params.get('skin') ?? DEFAULT_SKIN_ID);
+} else if (params.get('dev') === 'rtc') {
+  // The WebRTC lab: a page that can be either end of a peer connection, driven from
+  // outside. See dev/rtcLab.ts and tools/verifyWebrtc.ts.
+  startRtcLab(canvas);
 } else {
   const requested = params.get('skin') ?? DEFAULT_SKIN_ID;
   const skinId = skinIds().includes(requested) ? requested : DEFAULT_SKIN_ID;
@@ -41,6 +46,13 @@ if (params.get('dev') === 'rig') {
         }
       : undefined;
 
+  // Signalling origin. Baked in at build time via `VITE_SIGNAL_URL`, overridable with
+  // `?signal=` for testing against a local `wrangler dev`. Empty is a valid
+  // configuration: the game simply has no online mode, and single-device play is
+  // unaffected -- which is the right behaviour for a build somebody opened from a file.
+  const signalUrl =
+    params.get('signal') ?? (import.meta.env['VITE_SIGNAL_URL'] as string | undefined) ?? '';
+
   const game = new Game({
     canvas,
     skinId,
@@ -50,6 +62,7 @@ if (params.get('dev') === 'rig') {
     networked,
     netDebug,
     link,
+    signalUrl,
   });
   game.start();
 

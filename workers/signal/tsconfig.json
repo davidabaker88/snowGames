@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // WebWorker rather than DOM: a Worker has `crypto`, `Request` and `Response` but no
+    // document, and asking for DOM here would let a browser-only mistake compile.
+    "lib": ["ES2022", "WebWorker"],
+    "types": [],
+    "rootDir": ".",
+    "outDir": "dist-types",
+    "emitDeclarationOnly": true,
+    "paths": {
+      "@snow/shared": ["../../packages/shared/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "env.d.ts"],
+  "references": [{ "path": "../../packages/shared" }]
+}

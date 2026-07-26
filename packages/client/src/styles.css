@@ -256,3 +256,187 @@ body {
     line-height: 1.35;
   }
 }
+
+/*
+ * Lobby.
+ *
+ * Same palette and structure as the mode picker, because they are the same kind of
+ * screen: buttons and text shown while paused. The one thing that is genuinely
+ * different is the room code, which is sized to be read out loud across a room rather
+ * than read off a screen -- that is why it gets `clamp()` up to 64px and letter
+ * spacing rather than being treated as body text.
+ */
+.lobby {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: max(12px, env(safe-area-inset-top)) 14px max(12px, env(safe-area-inset-bottom));
+  background: rgb(13 27 42 / 0.86);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+  z-index: 22;
+}
+
+.lobby[hidden] {
+  display: none;
+}
+
+.lobby-card {
+  width: min(460px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  display: grid;
+  gap: 10px;
+  background: #16283c;
+  border: 1px solid #2c4459;
+  border-radius: 14px;
+  padding: 20px;
+  color: #e9f1fa;
+  text-align: center;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 0.45);
+}
+
+.lobby-card h1 {
+  margin: 0;
+  font-size: clamp(20px, 5.5vw, 25px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.lobby-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #93a8bf;
+  text-wrap: balance;
+}
+
+/* The code itself. Tabular figures so O-like and 0-like glyphs stay distinct, and a
+   monospace stack because proportional digits at this size read unevenly. */
+.lobby-code {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: clamp(38px, 13vw, 64px);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #f2a63b;
+  padding: 6px 0 2px;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.lobby-divider {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #6f849c;
+  margin: 2px 0;
+}
+
+.lobby-join {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.lobby-code-input {
+  font: inherit;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-align: center;
+  text-transform: uppercase;
+  padding: 10px 12px;
+  color: #e9f1fa;
+  background: #0f2035;
+  border: 1px solid #2c4459;
+  border-radius: 9px;
+  min-width: 0;
+}
+
+.lobby-code-input:focus {
+  outline: 2px solid #f2a63b;
+  outline-offset: 1px;
+}
+
+.lobby-code-input::placeholder {
+  color: #45607d;
+  letter-spacing: 0.18em;
+}
+
+.lobby-roster {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: #c3d4e6;
+}
+
+.lobby-card button {
+  font: inherit;
+  font-weight: 700;
+  padding: 12px;
+  border-radius: 9px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.lobby-primary {
+  font-size: 15px;
+  color: #2a1c06;
+  background: #f2a63b;
+}
+
+.lobby-primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.lobby-secondary {
+  font-size: 15px;
+  color: #e9f1fa;
+  background: #1d3450;
+  border-color: #2c4459;
+}
+
+.lobby-secondary:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.lobby-quiet {
+  font-size: 13px;
+  font-weight: 600;
+  color: #93a8bf;
+  background: transparent;
+  padding: 8px;
+}
+
+.lobby-card button:focus-visible {
+  outline: 2px solid #f2a63b;
+  outline-offset: 2px;
+}
+
+/* "Play with other devices", under the mode list. Quieter than a mode button, because
+   choosing WHAT to play comes before choosing WHO with. */
+.mode-together {
+  margin-top: 10px;
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 11px;
+  color: #2a1c06;
+  background: #f2a63b;
+  border: none;
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.mode-together:focus-visible {
+  outline: 2px solid #e9f1fa;
+  outline-offset: 2px;
+}

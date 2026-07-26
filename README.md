@@ -2,14 +2,10 @@
 
 A 3/4 top-down multiplayer snowball fight for the browser, built mobile-first.
 
-**Playable now:** five game modes against bots — pack snowballs by circling your
-thumb, throw them with a flick, build and wreck snow walls, take the hill, steal
-the flag, or outlast a closing blizzard.
-
-The authoritative netcode is written and tested too, and you can play against it:
-`/?netdebug=1&lat=150&loss=3` runs a real host in the same tab over a deliberately
-bad link. What is still missing is the *transport* that would carry it between two
-devices — see [Roadmap](#roadmap).
+**Playable now:** five game modes, on one device against bots or across several
+devices over WebRTC. One phone hosts, shows a four-character code, and everyone else
+joins with it. Pack snowballs by circling your thumb, throw them with a flick, build
+and wreck snow walls, take the hill, steal the flag, or outlast a closing blizzard.
 
 ## Running it
 
@@ -53,6 +49,8 @@ main WiFi network, not the guest one.
 | `/?net=1` | Play through a real host and net client in the same tab |
 | `/?netdebug=1` | The above, plus the netcode overlay |
 | `/?lat=150&loss=3` | Inject latency and packet loss, so you can *feel* a bad link |
+| `/?signal=https://…` | Point at a signalling server, overriding the built-in one |
+| `/?dev=rtc` | **WebRTC lab**: a page that can be either end of a peer connection |
 
 ## Controls
 
@@ -113,6 +111,9 @@ different numbers (a different zone, asymmetric build budgets, asymmetric respaw
 timers, a long warm-up and a single-capture win). That's the payoff of putting mode
 rules behind an interface: the *second* mode of a family costs a config block.
 
+Every mode except Practice plays across devices too — pick one, then tap **Play with
+other devices**.
+
 Bots are not a separate code path. A bot produces the same `InputFrame` a thumb
 does — move axes, aim, buttons, pack delta — and its objective comes from the mode
 itself via `mode.botObjective`, so a new mode gets bots that understand it without
@@ -123,8 +124,10 @@ runs a full bot match in a browser and asserts somebody actually wins.
 
 ```
 packages/
-  shared/   simulation, animation, game rules -- runs in BOTH Node and the browser
-  client/   rendering, input, HUD
+  shared/   simulation, animation, game rules, netcode -- runs in Node AND the browser
+  client/   rendering, input, HUD, WebRTC transport
+workers/
+  signal/   the room mailbox: a Cloudflare Worker, deployed separately
 ```
 
 `shared/` has no build step: the client resolves it straight to source through a
@@ -151,8 +154,8 @@ all 360° of facing via a turntable projection, rather than eight sets of artwor
 
 **Gameplay tunables live in one file.** `shared/src/constants.ts` owns tick rate,
 the throw arc, wall heights and every action duration. Animation clips are stretched
-to fit the simulation's timings, never the reverse — the future authoritative server
-has no clips in memory and must not be able to disagree about how long a throw takes.
+to fit the simulation's timings, never the reverse — the authoritative host has no clips
+in memory and must not be able to disagree about how long a throw takes.
 
 ### Walls
 
@@ -204,9 +207,10 @@ fix is to extend `ModeHud`, not to hand a mode a drawing context.
 ## Tests
 
 ```bash
-pnpm test          # unit tests
+pnpm test           # unit tests
 pnpm typecheck
-pnpm verify        # drives the real game in headless Chromium, writes screenshots
+pnpm verify         # drives the real game in headless Chromium, writes screenshots
+pnpm verify:webrtc  # two browser pages, one real peer connection, one real match
 ```
 
 `pnpm verify` is the interesting one: it launches Chromium, dispatches real
@@ -221,6 +225,13 @@ one process, playing every mode to completion, first on a clean link and then at
 150ms latency, 40ms jitter, 3% loss and 1% reorder — asserting a valid winner, that
 every client converges tick-for-tick with the host, and that traffic stays inside
 8 KB/s down and 1.2 KB/s up per player.
+
+`pnpm verify:webrtc` is the one that proves cross-device play: a `GameHost` in one
+browser context, a `NetClient` in another, two genuine `RTCPeerConnection`s, and the
+test process acting as the signalling mailbox exactly as the Worker does. Two separate
+contexts rather than two peers in one page, deliberately — same-page peers share a
+network stack and an mDNS resolver, so they connect in situations where independent
+contexts cannot, which makes them the weaker test.
 A test that set `packProgress = 2.5` directly would prove nothing about whether
 circling works.
 
@@ -264,6 +275,18 @@ Notable regression guards, each one written because the bug actually happened:
 - A lost Welcome used to strand a client permanently: the host had already marked it
   joined, so every retried Hello was ignored while snapshots it could not use
   streamed past. Hello is answered idempotently now.
+- ICE gathering **never reports `complete`** in this project's test browser — measured
+  at nine seconds with no STUN configured — and can stall in the wild whenever a
+  configured STUN server is unreachable. Non-trickle gathering therefore waits for
+  candidates to *stop arriving*, not for a state transition that may never come.
+- "Has the match started" cannot be inferred from `world.tick > 0`. The host starts
+  ticking the moment it exists, because otherwise the handshake never completes, so
+  that test is already true before the first player has joined. The symptom was a
+  hosted match that ran perfectly and had no bots in it.
+- A room code the player misread is **rejected, not guessed at**. Folding `0` onto `Q`
+  is tempting, but `0` resembles `O`, `Q` and `D` about equally and silently joining
+  the wrong match is worse than being told the code is wrong. The real fix is upstream:
+  the generator never emits a confusable character.
 
 ## Roadmap
 
@@ -272,26 +295,87 @@ Notable regression guards, each one written because the bug actually happened:
 | 4 | Snow walls: build and destroy | **done** |
 | 5 | Pluggable game-mode framework + the four game modes + bots | **done** |
 | 6 | Authoritative netcode: host, prediction, interpolation, lag compensation | **done** |
-| 7 | WebRTC transport + signalling, so one phone can host for the others | next |
+| 7 | WebRTC transport, signalling, room codes — one phone hosts for the others | **done** |
+| — | Bluetooth, accounts, ranked play, spectator streams | not planned |
 
-### Where multiplayer is heading
+## Playing across devices
 
 A browser **cannot listen on a TCP port** — there is no server-socket API in
-JavaScript, on any platform. So a phone can never be the thing others type a URL into.
+JavaScript, on any platform. So a phone can never be the thing other people type a URL
+into, and that is why this took a transport rather than a server.
+
 What a phone browser *can* do is run the authoritative simulation with everyone else
 attached over **WebRTC DataChannels**, which connect peer-to-peer with neither side
-listening. That is the plan: the page comes from static hosting, the *game* runs on
-whichever phone tapped "host".
+listening. So: the page comes from static hosting, and the *game* runs on whichever
+phone tapped Host.
 
-Phase 6 is the part that had to come first, and it is done. The only thing Phase 7
-changes is how two ends are connected:
+Everything above the transport was already written and tested against
+`createLocalPair()` in Phase 6, and needed no changes. Phase 7 replaced one line:
 
 ```
 createLocalPair()   ->   a WebRTC DataChannel pair
 ```
 
-Everything above that line — the host, the codecs, prediction, reconciliation,
-interpolation, lag compensation — is already written and tested, and does not care.
+### Setting up the signalling server
+
+Two peers cannot use each other to exchange the descriptions they need in order to
+reach each other, so something has to carry a few hundred bytes each way at join time.
+That is all the signalling server does — it never sees an input, a snapshot, or
+anything about the game.
+
+That distinction is what makes it free rather than expensive. A *relaying* game server
+carries every message of every match, which worked out at roughly **14 eight-player
+matches a day** on Cloudflare's free tier. This carries about six requests per player
+per **join**, so the same free tier covers thousands of matches a day. The difference
+is not optimisation; it is that peer-to-peer traffic never arrives there at all.
+
+```bash
+cd workers/signal
+npx wrangler deploy          # prints https://snowball-signal.<you>.workers.dev
+```
+
+Then build the client with that origin baked in:
+
+```bash
+VITE_SIGNAL_URL=https://snowball-signal.<you>.workers.dev pnpm build
+```
+
+No account is needed to *play* and no credit card is needed to deploy. Note the
+wrangler config uses `new_sqlite_classes` for the Durable Object: that is the storage
+backend available on the free plan, and the older key-value one deploys fine and then
+fails at runtime with a billing error.
+
+Leaving `VITE_SIGNAL_URL` unset is a valid configuration — the game just has no online
+mode, and says so plainly when you tap Host. Single-device play is unaffected.
+
+### Known risks, stated honestly
+
+**mDNS candidates.** Chrome and Safari hide local IPs behind `.local` hostnames in ICE
+candidates, so two phones on the same WiFi need mDNS resolution between them. That
+usually works on a home network and can fail where multicast is blocked — guest and
+enterprise networks especially. This is the one part not proven here: the automated test
+disables mDNS because two containerised browser contexts cannot resolve each other's
+`.local` names, so **real two-device LAN play is worth testing on actual hardware
+before trusting it.** Public STUN is configured, which covers play across the internet
+and provides a fallback.
+
+**No TURN server.** A relay is the one part of WebRTC that genuinely costs money at
+volume, so there is none. Connections that would need one — some symmetric NATs — will
+fail rather than quietly bill somebody.
+
+### The transport seam earned its keep
+
+Rule 3 of `net/transport.ts` was *"assume nothing about reliability or ordering, even
+though WebSocket provides both."* Phase 7 is where that paid off. WebRTC offers an
+unreliable unordered channel, and for the hot path it is strictly better: on a reliable
+ordered channel a lost snapshot **head-of-line blocks every later one** behind a
+retransmit of data that is already obsolete.
+
+So the transport opens two channels. Snapshots, inputs and pings go down the unreliable
+one and are allowed to vanish — each is re-stated by the next. Joins, events and the
+rest go down the reliable one. The netcode picks per message via `send(data, reliable)`,
+a delivery hint carrying no game vocabulary, defaulting to reliable so anything
+unconsidered is safe.
 
 ### The netcode
 

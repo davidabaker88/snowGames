@@ -17,7 +17,9 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "build:single": "vite build packages/client --outDir dist-single --sourcemap false && tsx tools/bundleSingleFile.ts snowball-playtest.html",
-    "verify:single": "tsx tools/verifySingleFile.ts snowball-playtest.html"
+    "verify:single": "tsx tools/verifySingleFile.ts snowball-playtest.html",
+    "verify:webrtc": "tsx tools/verifyWebrtc.ts",
+    "deploy:signal": "pnpm -C workers/signal deploy"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",

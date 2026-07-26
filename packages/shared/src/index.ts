@@ -15,6 +15,8 @@ export * from './net/snapshot.js';
 export * from './net/clock.js';
 export * from './net/host.js';
 export * from './net/client.js';
+export * from './net/signalling.js';
+export * from './net/memorySignalling.js';
 
 export * from './input/inputFrame.js';
 

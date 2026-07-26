@@ -493,7 +493,7 @@ export class NetClient {
         INPUT_SCHEMA,
       );
     }
-    this.send(this.writer.view_());
+    this.send(this.writer.view_(), false);
   }
 
   private maybePing(): void {
@@ -515,7 +515,7 @@ export class NetClient {
     this.writer.reset();
     this.writer.u8(Op.Ping);
     this.writer.u32(stamp);
-    this.send(this.writer.view_());
+    this.send(this.writer.view_(), false);
   }
 
   private decayError(dtMs: number): void {
@@ -660,10 +660,16 @@ export class NetClient {
     this.send(encodeJson(op, body));
   }
 
-  private send(data: Uint8Array): void {
+  /**
+   * Reliable by default. Input frames and pings opt out, for the same reason the host
+   * does with snapshots: an input carries a redundant window of recent frames, so the
+   * next message already replaces a lost one, and waiting on a retransmit would hold
+   * up input that is still fresh behind input that is not.
+   */
+  private send(data: Uint8Array, reliable = true): void {
     if (!this.opts.transport.isOpen) return;
     this.bytesOut += data.byteLength;
-    this.opts.transport.send(data);
+    this.opts.transport.send(data, reliable);
   }
 
   close(): void {

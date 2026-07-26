@@ -1,0 +1,25 @@
+# Deploy with:  npx wrangler deploy   (from this directory)
+#
+# The free plan covers this comfortably. Note WHY: this Worker is a mailbox used for a
+# couple of seconds per join, not a relay that carries the match. A relaying game server
+# on the same plan works out at roughly fourteen 8-player matches a day; this is a
+# handful of requests per player per join, so the same plan covers thousands.
+
+name = "snowball-signal"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# `new_sqlite_classes` rather than `new_classes`: the SQLite-backed storage backend is
+# the one available on the free plan. Using the older key-value backend would deploy
+# fine and then fail at runtime with a billing error, which is a miserable way to find
+# out.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+[observability]
+enabled = true

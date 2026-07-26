@@ -299,7 +299,7 @@ export class GameHost {
         this.replyWriter.u8(Op.Pong);
         this.replyWriter.u32(stamp);
         this.replyWriter.u32(this.world.tick);
-        this.send(c, this.replyWriter.view_());
+        this.send(c, this.replyWriter.view_(), false);
         return;
       }
       default:
@@ -689,7 +689,7 @@ export class GameHost {
       );
       c.wallSentAt.set(this.world.tick, this.encodeRes.wallVersionSent);
       this.snapshotBytesLast = this.writer.length;
-      this.send(c, this.writer.view_());
+      this.send(c, this.writer.view_(), false);
     }
   }
 
@@ -699,11 +699,17 @@ export class GameHost {
     for (const c of this.conns) if (c.joined) this.send(c, bytes);
   }
 
-  private send(c: Conn, data: Uint8Array): void {
+  /**
+   * `reliable` defaults to true, so a new message type is safe until someone decides
+   * otherwise. Snapshots and pongs opt out: a snapshot is re-stated by the next one
+   * and a pong by the next probe, so retransmitting either would delay fresher data
+   * behind information that is already stale.
+   */
+  private send(c: Conn, data: Uint8Array, reliable = true): void {
     if (!c.transport.isOpen) return;
     c.bytesOut += data.byteLength;
     this.bytesOut += data.byteLength;
-    c.transport.send(data);
+    c.transport.send(data, reliable);
   }
 
   /**

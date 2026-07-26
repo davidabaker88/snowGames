@@ -708,6 +708,76 @@ async function run(): Promise<void> {
     await netPage.close();
     await modeCtx.close();
 
+    // ---- the lobby ----------------------------------------------------------
+    console.log('\n=== The lobby ===');
+    // Its own context: the mode/netcode context is closed by this point, and the lobby
+    // is worth testing on a clean profile anyway.
+    const lobbyCtx = await browser.newContext({
+      viewport: { width: 844, height: 390 },
+      deviceScaleFactor: 2,
+      hasTouch: true,
+      isMobile: true,
+    });
+    const lobbyPage = await lobbyCtx.newPage();
+    const lobbyErrs: string[] = [];
+    lobbyPage.on('pageerror', (e) => lobbyErrs.push(String(e)));
+    await lobbyPage.goto(`${base}/`, { waitUntil: 'networkidle' });
+    await lobbyPage.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
+    await lobbyPage.waitForTimeout(300);
+
+    check(
+      'the picker offers online play',
+      await lobbyPage.isVisible('.mode-together'),
+    );
+    await lobbyPage.click('.mode-btn[data-mode="teamWar"] >> nth=0', { trial: true });
+    await lobbyPage.hover('.mode-btn[data-mode="captureTheFlag"]');
+    await lobbyPage.click('[data-action="play-together"]');
+    await lobbyPage.waitForTimeout(250);
+    check('tapping it opens the lobby', await lobbyPage.isVisible('.lobby'));
+    check('the mode picker got out of the way', !(await lobbyPage.isVisible('.mode-select')));
+    await lobbyPage.screenshot({ path: `${OUT}/24-lobby.png` });
+
+    // The code field must normalise as you type, and refuse to submit nonsense.
+    const codeInput = lobbyPage.locator('.lobby-code-input');
+    await codeInput.fill('ab');
+    check(
+      'Join stays disabled for a short code',
+      await lobbyPage.locator('.lobby-secondary').isDisabled(),
+    );
+    await codeInput.fill('a-b c9');
+    const typed = await codeInput.inputValue();
+    check('the code field normalises as you type', typed === 'ABC9', typed);
+    check(
+      'Join becomes available for a valid code',
+      !(await lobbyPage.locator('.lobby-secondary').isDisabled()),
+    );
+
+    // Excluded characters are dropped, not guessed at.
+    await codeInput.fill('AOB0C');
+    const folded = await codeInput.inputValue();
+    check('confusable characters are dropped rather than remapped', folded === 'ABC', folded);
+
+    // With no signalling server configured, hosting has to fail clearly rather than
+    // hang -- a build served from a file is a real configuration.
+    await codeInput.fill('');
+    await lobbyPage.click('.lobby-primary');
+    await lobbyPage.waitForTimeout(600);
+    const failText = await lobbyPage.locator('.lobby-sub').first().textContent();
+    check(
+      'hosting without a signalling server says so',
+      (failText ?? '').toLowerCase().includes('signalling'),
+      failText ?? '(nothing)',
+    );
+    await lobbyPage.screenshot({ path: `${OUT}/25-lobby-no-signal.png` });
+
+    // And it must be possible to back out to single-device play.
+    await lobbyPage.click('.lobby-quiet >> nth=-1');
+    await lobbyPage.waitForTimeout(300);
+    check('you can back out to playing on this device', await lobbyPage.isVisible('.mode-select'));
+    check('the lobby had no runtime errors', lobbyErrs.length === 0, lobbyErrs.slice(0, 2).join(' | '));
+    await lobbyPage.close();
+    await lobbyCtx.close();
+
     console.log('\n=== The swappable-skin promise ===');
     await page.evaluate(() => window.__snowInput.key('KeyK', 60));
     await page.waitForTimeout(400);

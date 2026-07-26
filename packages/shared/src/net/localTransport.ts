@@ -104,7 +104,15 @@ class LocalTransport implements Transport {
     });
   }
 
-  send(data: Uint8Array): void {
+  /**
+   * The reliability hint is accepted and deliberately ignored.
+   *
+   * This transport already models loss explicitly through `LinkConditions`, which is
+   * the more useful behaviour for a test: honouring the hint would make the hot path
+   * lossy and the cold path not, so a suite configured for 3% loss would silently be
+   * testing something other than what it said.
+   */
+  send(data: Uint8Array, _reliable = true): void {
     if (!this.open) {
       this.errorEmitter.emit(new Error('send() on a closed transport'));
       return;
