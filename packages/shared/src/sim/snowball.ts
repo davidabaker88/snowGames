@@ -73,6 +73,32 @@ export function ballBaseDamage(size: BallSize): number {
  * throw is both faster AND higher, so it clears taller cover.
  */
 export function launchBall(w: World, b: Ball, thrower: Player, aim: number, power: number): void {
+  launchBallFrom(w, b, thrower, thrower.x, thrower.y, aim, power);
+}
+
+/**
+ * Launch from an explicit origin rather than from wherever the thrower is now.
+ *
+ * Exists for lag compensation: a laggy player's snowball should leave from where
+ * they actually were when they flicked, not from where the host has since moved
+ * them to. See `LagComp` in `step.ts`.
+ */
+export function launchBallFrom(
+  w: World,
+  b: Ball,
+  thrower: Player,
+  originX: number,
+  originY: number,
+  aim: number,
+  power: number,
+  /**
+   * Set false when the caller will fast-forward the ball and wants the event to
+   * describe where it ENDED UP. The event position drives the release puff, so
+   * emitting it before a catch-up would put the puff at a position the ball has
+   * already left -- for a lagged player, a couple of body-widths behind the hand.
+   */
+  emitEvent = true,
+): void {
   const speed = lerp(THROW_MIN_SPEED, THROW_MAX_SPEED, clamp01(power));
   b.state = BallState.Flight;
   b.owner = thrower.id;
@@ -81,8 +107,8 @@ export function launchBall(w: World, b: Ball, thrower: Player, aim: number, powe
 
   // Start slightly ahead of the thrower so the ball does not clip their own body.
   const off = PLAYER_RADIUS + ballRadius(b.size) + 2;
-  b.x = thrower.x + Math.cos(aim) * off;
-  b.y = thrower.y + Math.sin(aim) * off * Y_SQUASH;
+  b.x = originX + Math.cos(aim) * off;
+  b.y = originY + Math.sin(aim) * off * Y_SQUASH;
   b.z = THROW_RELEASE_HEIGHT;
 
   b.vx = Math.cos(aim) * speed;
@@ -90,7 +116,49 @@ export function launchBall(w: World, b: Ball, thrower: Player, aim: number, powe
   b.vz = speed * LOB_RATIO;
   b.spin = 0;
 
-  pushEvent(w, SimEventType.Thrown, b.id, b.x, b.y, b.z, power, thrower.id);
+  if (emitEvent) emitThrown(w, b, power, thrower.id);
+}
+
+export function emitThrown(w: World, b: Ball, power: number, throwerId: number): void {
+  pushEvent(w, SimEventType.Thrown, b.id, b.x, b.y, b.z, power, throwerId);
+}
+
+/**
+ * Advance a ball through `ticks` of pure ballistics: gravity and drag, no collision.
+ *
+ * This is the "fast-forward" half of lag compensation. Deliberately collision-free,
+ * and that is the whole design rather than a shortcut: the ball is catching up
+ * through time that has already happened, so testing it against where bodies are
+ * NOW would be checking the wrong world, while testing it against where they were
+ * would be shooter-style hit rewind -- which is exactly what this scheme avoids,
+ * because a snowball is visibly in the air for the better part of a second and
+ * "I was behind cover" would be a legitimate complaint.
+ *
+ * So the catch-up is ballistic, and from the current tick onward the ball collides
+ * normally against present positions. Thrower-favoured spawn, victim-favoured hit.
+ */
+export function ballisticAdvance(b: Ball, ticks: number): void {
+  const drag = 1 - AIR_DRAG * TICK_DT;
+  for (let i = 0; i < ticks; i++) {
+    if (b.state !== BallState.Flight) return;
+    b.vx *= drag;
+    b.vy *= drag;
+    b.vz = b.vz * drag - GRAVITY * TICK_DT;
+
+    const dx = b.vx * TICK_DT;
+    const dy = b.vy * TICK_DT;
+    b.x += dx;
+    b.y += dy;
+    b.z += b.vz * TICK_DT;
+    b.spin += Math.sqrt(dx * dx + dy * dy) * 0.05;
+
+    // A short throw can land inside the catch-up window. Stop at the ground and
+    // leave the landing itself to the normal step, which knows how to bounce.
+    if (b.z <= 0) {
+      b.z = 0;
+      return;
+    }
+  }
 }
 
 /** Set a held ball down on the ground in front of the player. */

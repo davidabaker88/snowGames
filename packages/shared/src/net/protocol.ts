@@ -227,6 +227,27 @@ export const CLOCK_SAMPLES = 16;
  * against present-tick positions with no rewind at all (victim-favoured).
  */
 export const LAGCOMP_MAX_REWIND_MS = 200;
+export const LAGCOMP_MAX_REWIND_TICKS = Math.round((LAGCOMP_MAX_REWIND_MS / 1000) * TICK_HZ);
+/**
+ * How many ticks of position history the host keeps per player.
+ *
+ * A little past the rewind cap, so the newest usable entry is never the oldest one
+ * held -- an off-by-one there would silently disable compensation for exactly the
+ * laggiest players it exists to help.
+ */
+export const LAGCOMP_HISTORY_TICKS = LAGCOMP_MAX_REWIND_TICKS + 4;
+
+/**
+ * The part of a client's acknowledgement gap that is NOT network latency.
+ *
+ * The host infers one-way delay from how far behind a client's snapshot
+ * acknowledgement is, but that gap has structural terms in it even on a link with no
+ * latency at all: snapshots only go out every `SNAPSHOT_EVERY_TICKS`, and consumed
+ * input sits in the jitter buffer first. Left in, they hand a local single-device
+ * player a tick of rewind they have not earned. Subtracting them makes a
+ * zero-latency connection measure as exactly zero.
+ */
+export const LAGCOMP_ACK_BASELINE_TICKS = SNAPSHOT_EVERY_TICKS + INPUT_BUFFER_TARGET;
 
 // ---------------------------------------------------------------------------
 // Disconnect handling

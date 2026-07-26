@@ -30,9 +30,15 @@ import {
   type InputFrame,
 } from '../input/inputFrame.js';
 import { botInput, createBotBrain, type BotBrain } from '../sim/bot.js';
-import { startMatch, step, type InputMap } from '../sim/step.js';
-import type { SimEvent } from '../sim/types.js';
-import { spawnPlayer, type Player, type World } from '../sim/world.js';
+import {
+  startMatch,
+  step,
+  type InputMap,
+  type LagComp,
+  type ThrowOrigin,
+} from '../sim/step.js';
+import type { PlayerId, SimEvent } from '../sim/types.js';
+import { MAX_PLAYERS, spawnPlayer, type Player, type World } from '../sim/world.js';
 import { Emitter, type Signal } from './signal.js';
 import { Writer, decodeJson, encodeJson, opOf } from './codec.js';
 import { INPUT_SCHEMA } from './schema.js';
@@ -41,6 +47,9 @@ import {
   CONNECTION_TIMEOUT_TICKS,
   INPUT_BUFFER_TARGET,
   INPUT_REDUNDANCY,
+  LAGCOMP_ACK_BASELINE_TICKS,
+  LAGCOMP_HISTORY_TICKS,
+  LAGCOMP_MAX_REWIND_TICKS,
   Op,
   PROTOCOL_VERSION,
   SNAPSHOT_EVERY_TICKS,
@@ -176,6 +185,38 @@ export class GameHost {
   private readonly eventEmitter = new Emitter<readonly SimEvent[]>();
   /** Fires every tick with that tick's events, for a host that also renders. */
   readonly onEvents: Signal<readonly SimEvent[]> = this.eventEmitter;
+
+  private readonly history = new PositionHistory(MAX_PLAYERS, LAGCOMP_HISTORY_TICKS);
+
+  /**
+   * Lag compensation, measured HOST-SIDE.
+   *
+   * The rewind is derived from how far behind each client's snapshot acknowledgement
+   * is: that gap is a round trip plus a little, so half of it approximates the
+   * one-way delay. Deriving it here rather than letting the client state its own
+   * latency costs nothing and removes a trust question entirely -- although it is
+   * worth noting that lying would be self-defeating anyway, since a larger rewind
+   * means throwing from a staler position.
+   *
+   * Bots and any connection whose lag is under a tick get no rewind, so a
+   * single-device match behaves exactly as it did before this existed.
+   */
+  private readonly lagComp: LagComp = {
+    rewindTicks: (playerId: PlayerId): number => {
+      const c = this.connFor(playerId);
+      if (!c || c.ackedTick < 0) return 0;
+      const lag = this.world.tick - c.ackedTick - LAGCOMP_ACK_BASELINE_TICKS;
+      if (lag <= 0) return 0;
+      return Math.min(Math.round(lag / 2), LAGCOMP_MAX_REWIND_TICKS);
+    },
+    originAt: (playerId: PlayerId, ticksAgo: number, out: ThrowOrigin): boolean =>
+      this.history.lookup(playerId, ticksAgo, out),
+  };
+
+  private connFor(playerId: PlayerId): Conn | undefined {
+    for (const c of this.conns) if (c.joined && c.playerId === playerId) return c;
+    return undefined;
+  }
 
   constructor(private readonly opts: HostOptions) {
     this.world = opts.createWorld(opts.modeId, opts.seed);
@@ -526,8 +567,15 @@ export class GameHost {
 
   /** One authoritative tick. Exposed so tests can drive without a clock. */
   tick(): readonly SimEvent[] {
+    // Record positions BEFORE stepping, so "N ticks ago" means the state the client
+    // was actually looking at when it decided to throw, not the state after.
+    this.history.record(this.world, this.world.tick);
+
     this.collectInputs();
-    const events = step(this.world, this.inputMap, { mode: 'authoritative' });
+    const events = step(this.world, this.inputMap, {
+      mode: 'authoritative',
+      lagComp: this.lagComp,
+    });
     for (const f of this.usedFrames) this.freeFrame(f);
     this.usedFrames.length = 0;
     this.expireSnowmen();
@@ -677,6 +725,62 @@ export class GameHost {
 }
 
 const SPAWN_OUT = { x: 0, y: 0 };
+
+/**
+ * A short ring of where each player has been, for lag compensation.
+ *
+ * Flat typed arrays indexed by `(playerId * depth + slot)`: this is written every
+ * tick for every player and read on every throw, so it is worth keeping free of
+ * per-tick object churn.
+ */
+class PositionHistory {
+  private readonly x: Float32Array;
+  private readonly y: Float32Array;
+  private readonly aim: Float32Array;
+  private readonly stamped: Int32Array;
+  private tick = -1;
+
+  constructor(
+    private readonly players: number,
+    private readonly depth: number,
+  ) {
+    const n = players * depth;
+    this.x = new Float32Array(n);
+    this.y = new Float32Array(n);
+    this.aim = new Float32Array(n);
+    this.stamped = new Int32Array(n).fill(-1);
+  }
+
+  record(w: World, tick: number): void {
+    this.tick = tick;
+    const slot = ((tick % this.depth) + this.depth) % this.depth;
+    for (let i = 0; i < this.players; i++) {
+      const p = w.players[i];
+      if (!p) continue;
+      const at = i * this.depth + slot;
+      this.x[at] = p.x;
+      this.y[at] = p.y;
+      this.aim[at] = p.aim;
+      this.stamped[at] = p.active ? tick : -1;
+    }
+  }
+
+  lookup(playerId: number, ticksAgo: number, out: ThrowOrigin): boolean {
+    if (playerId < 0 || playerId >= this.players) return false;
+    if (ticksAgo < 0 || ticksAgo >= this.depth) return false;
+    const want = this.tick - ticksAgo;
+    const slot = ((want % this.depth) + this.depth) % this.depth;
+    const at = playerId * this.depth + slot;
+    // The stamp check is what makes a stale ring entry unusable rather than
+    // silently wrong: early in a match, or just after a join, the slot holds
+    // whatever a previous match left in it.
+    if (this.stamped[at] !== want) return false;
+    out.x = this.x[at]!;
+    out.y = this.y[at]!;
+    out.aim = this.aim[at]!;
+    return true;
+  }
+}
 
 /** Beyond this a client's backlog is stale rather than useful. Two seconds. */
 const MAX_PENDING_FRAMES = 60;

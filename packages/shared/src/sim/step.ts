@@ -26,10 +26,39 @@ import type { World } from './world.js';
 
 export type StepMode = 'authoritative' | 'predict';
 
+/** Where a player was, for lag compensation. */
+export interface ThrowOrigin {
+  x: number;
+  y: number;
+  aim: number;
+}
+
+/**
+ * Lag compensation, supplied by the host.
+ *
+ * A seam rather than something the simulation owns, because "how far behind is this
+ * player" is a network fact and the simulation must stay a pure function of the
+ * state and inputs it is handed. Absent -- in a client's prediction, and in every
+ * offline test -- throws simply spawn from the present position, and behaviour is
+ * unchanged.
+ *
+ * Note this compensates the SPAWN only. It deliberately never rewinds a victim; see
+ * `ballisticAdvance` for why that would be the wrong trade for a projectile with
+ * most of a second of flight time.
+ */
+export interface LagComp {
+  /** How far back this player's throw should originate. 0 disables it. */
+  rewindTicks(playerId: PlayerId): number;
+  /** Where the player was `ticksAgo` ticks ago. False when unknown. */
+  originAt(playerId: PlayerId, ticksAgo: number, out: ThrowOrigin): boolean;
+}
+
 export interface StepCtx {
   mode: StepMode;
   /** In predict mode, only this player's input is meaningful. */
   localPlayerId?: PlayerId;
+  /** Host-only. See `LagComp`. */
+  lagComp?: LagComp;
 }
 
 export type InputMap = ReadonlyMap<PlayerId, InputFrame>;
@@ -156,7 +185,7 @@ function sysPlayers(w: World, inputs: InputMap, ctx: StepCtx): void {
     const raw = inputs.get(p.id);
     const input = raw ?? EMPTY_INPUT;
     if (raw) validateInput(raw);
-    stepPlayer(w, p, input);
+    stepPlayer(w, p, input, ctx.lagComp);
   }
 }
 

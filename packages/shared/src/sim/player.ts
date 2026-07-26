@@ -44,7 +44,14 @@ import { Button, hasButton, type InputFrame } from '../input/inputFrame.js';
 import { resolveCircleOverlap } from './collision.js';
 import { ActionState, BallState, SimEventType, type EntityId } from './types.js';
 import { allocBall, freeBall, pushEvent, type Player, type World } from './world.js';
-import { launchBall, placeBallAt } from './snowball.js';
+import {
+  ballisticAdvance,
+  emitThrown,
+  launchBall,
+  launchBallFrom,
+  placeBallAt,
+} from './snowball.js';
+import type { LagComp, ThrowOrigin } from './step.js';
 import {
   buildAt,
   makeCircleResolve,
@@ -171,7 +178,12 @@ export function findGroundedBallNear(w: World, x: number, y: number, radius: num
   return best;
 }
 
-export function stepPlayer(w: World, p: Player, input: InputFrame): void {
+export function stepPlayer(
+  w: World,
+  p: Player,
+  input: InputFrame,
+  lagComp?: LagComp,
+): void {
   if (!p.active) return;
 
   if (!p.alive) {
@@ -192,7 +204,7 @@ export function stepPlayer(w: World, p: Player, input: InputFrame): void {
 
     // Mid-action transfer points. These read from constants, never from a clip.
     if (p.action === ActionState.Throwing && p.actionTicks === THROW_RELEASE_TICK) {
-      releaseThrow(w, p);
+      releaseThrow(w, p, lagComp);
     } else if (p.action === ActionState.Placing && p.actionTicks === PLACE_TRANSFER_TICK) {
       doPlace(w, p);
     } else if (p.action === ActionState.PickingUp && p.actionTicks === PICKUP_TRANSFER_TICK) {
@@ -381,14 +393,40 @@ export function stepPlayer(w: World, p: Player, input: InputFrame): void {
   }
 }
 
-function releaseThrow(w: World, p: Player): void {
+const throwOrigin: ThrowOrigin = { x: 0, y: 0, aim: 0 };
+
+function releaseThrow(w: World, p: Player, lagComp?: LagComp): void {
   if (p.heldBall < 0) return;
   const b = w.balls[p.heldBall];
   if (!b || !b.alive) {
     p.heldBall = -1;
     return;
   }
-  launchBall(w, b, p, p.aim, p.pendingThrowPower);
+
+  // Lag compensation, when the host supplies it: spawn where the thrower was when
+  // they flicked, then fast-forward the ball through the time that has passed since.
+  // The aim comes from the history too -- reusing the current aim would launch from
+  // an old position along a new heading, which is neither what the player saw nor
+  // what they asked for.
+  const rewind = lagComp ? lagComp.rewindTicks(p.id) : 0;
+  if (rewind > 0 && lagComp!.originAt(p.id, rewind, throwOrigin)) {
+    launchBallFrom(
+      w,
+      b,
+      p,
+      throwOrigin.x,
+      throwOrigin.y,
+      throwOrigin.aim,
+      p.pendingThrowPower,
+      false,
+    );
+    ballisticAdvance(b, rewind);
+    // Announced after the catch-up, so the release puff lands where the ball is.
+    emitThrown(w, b, p.pendingThrowPower, p.id);
+  } else {
+    launchBall(w, b, p, p.aim, p.pendingThrowPower);
+  }
+
   p.heldBall = -1;
   p.throwCooldown = THROW_COOLDOWN_TICKS;
   p.pendingThrowPower = 0;

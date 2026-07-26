@@ -18,7 +18,7 @@ import { MAP_ARENA01 } from '../map/arena01.js';
 import { getMode } from '../modes/registry.js';
 import { fillWallRect, WallTier } from '../sim/walls.js';
 import { Button, createInputFrame, type InputFrame } from '../input/inputFrame.js';
-import { MatchPhase, TEAM_NONE } from '../sim/types.js';
+import { MatchPhase, SimEventType, TEAM_NONE } from '../sim/types.js';
 import { TICK_MS } from '../constants.js';
 import { createLocalPair, type LinkConditions, type LinkScheduler } from './localTransport.js';
 import { GameHost } from './host.js';
@@ -27,6 +27,8 @@ import {
   BUDGET_DOWN_BYTES_PER_SEC,
   BUDGET_UP_BYTES_PER_SEC,
   INTERP_DELAY_MAX_MS,
+  LAGCOMP_ACK_BASELINE_TICKS,
+  LAGCOMP_MAX_REWIND_TICKS,
   Op,
   RECONCILE_SNAP_UNITS,
   SNAPSHOT_EVERY_TICKS,
@@ -867,6 +869,75 @@ describe('disconnects', () => {
 
     expect(stranger.joined).toBe(true);
     expect(stranger.playerId).not.toBe(oldId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lag compensation, end to end
+// ---------------------------------------------------------------------------
+
+describe('lag compensation', () => {
+  it('engages for a laggy client and stays off for a local one', async () => {
+    // The rewind is derived host-side from how far behind each client's snapshot
+    // acknowledgement is, so this checks the derivation against two very different
+    // links rather than testing the stubbed provider again.
+    const slow = await makeRig({
+      modeId: 'teamWar',
+      humans: 1,
+      cond: { latencyMs: 160, seed: 3 },
+    });
+    slow.host.start();
+    await slow.run(2500);
+
+    const fast = await makeRig({ modeId: 'teamWar', humans: 1, cond: { latencyMs: 0, seed: 3 } });
+    fast.host.start();
+    await fast.run(2500);
+
+    // Mirrors the host's own derivation, including the structural baseline it
+    // subtracts -- see LAGCOMP_ACK_BASELINE_TICKS.
+    const rewindOf = (rig: Rig): number => {
+      const c = rig.clients[0]!;
+      const lag = rig.host.world.tick - c.confirmed.tick - LAGCOMP_ACK_BASELINE_TICKS;
+      if (lag <= 0) return 0;
+      return Math.min(Math.round(lag / 2), LAGCOMP_MAX_REWIND_TICKS);
+    };
+
+    expect(rewindOf(slow), 'a 160ms link should earn a rewind').toBeGreaterThan(0);
+    expect(rewindOf(slow)).toBeLessThanOrEqual(LAGCOMP_MAX_REWIND_TICKS);
+    // A zero-latency link is the single-device case, which must behave exactly as it
+    // did before lag compensation existed.
+    expect(rewindOf(fast), 'a local link should get none').toBe(0);
+  });
+
+  it('does not let a compensated throw change who is hittable', async () => {
+    // The victim-favoured half, over a real link: a laggy player's snowballs still
+    // land, and the match still converges, so the compensation has not introduced a
+    // divergence between host and client.
+    const rig = await makeRig({
+      modeId: 'teamWar',
+      humans: 2,
+      bots: 3,
+      cond: { latencyMs: 150, jitterMs: 30, lossPct: 2, seed: 11 },
+    });
+    rig.host.start();
+
+    const frames = rig.clients.map(() => createInputFrame());
+    let hits = 0;
+    for (const c of rig.clients) {
+      c.onEvents.on((evs) => {
+        for (const e of evs) if (e.type === SimEventType.Hit) hits++;
+      });
+    }
+    await rig.step((t) => {
+      for (let i = 0; i < rig.clients.length; i++) {
+        drive(frames[i]!, t, i);
+        rig.clients[i]!.advance(frames[i]!);
+      }
+    }, 700);
+    await rig.run(1500);
+
+    expect(hits, 'nothing ever hit anything').toBeGreaterThan(0);
+    for (const c of rig.clients) expectConverged(rig, c, 'with lag compensation on');
   });
 });
 
