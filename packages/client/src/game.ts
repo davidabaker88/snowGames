@@ -64,6 +64,9 @@ import { NetSession } from './net/netSession.js';
 import { Lobby } from './hud/lobby.js';
 import { HostedRoom, joinRoom, type JoinedRoom, type RoomStatus } from './net/room.js';
 import { HttpSignalling } from './net/httpSignalling.js';
+import { QrDisplay, QrScanner } from './hud/qrPanel.js';
+import { buildQr, qrSupported } from './net/qrCodec.js';
+import { createQrInvite, replyToQrInvite, type QrHostInvite } from './net/qrRoom.js';
 import type { Camera, Viewport } from './render/projection.js';
 
 /** Turn whatever came back from signalling into something a player can act on. */
@@ -144,6 +147,10 @@ export class Game {
   private pendingModeId: ModeId = 'teamWar';
   private pendingBots = 3;
 
+  private readonly qrDisplay = new QrDisplay();
+  private readonly qrScanner = new QrScanner();
+  private qrInvite: QrHostInvite | null = null;
+
   constructor(private readonly opts: GameOptions) {
     const canvas = opts.canvas;
     const ctx = canvas.getContext('2d', { alpha: false });
@@ -182,6 +189,8 @@ export class Game {
       onJoin: (code) => void this.joinAsGuest(code),
       onStart: () => this.startHostedMatch(),
       onCancel: () => this.leaveOnline(),
+      onHostQr: () => void this.hostViaQr(),
+      onJoinQr: () => void this.joinViaQr(),
     });
     if (!opts.modeId) this.modeSelect.show();
 
@@ -365,6 +374,162 @@ export class Game {
     this.lobby.show();
   }
 
+  // ---- QR play, which needs no server at all ------------------------------
+
+  /**
+   * Host by showing a code.
+   *
+   * A fresh `HostedRoom` is NOT used here: that class owns a signalling mailbox and a
+   * polling loop, and there is no mailbox in this path. What is shared is everything
+   * below -- the same `GameHost`, the same `WebRtcTransport`, the same client.
+   */
+  private async hostViaQr(): Promise<void> {
+    if (!this.ensureQrSupported()) return;
+    this.teardownOnline();
+    try {
+      const room = new HostedRoom({
+        signalling: this.signalling(),
+        modeId: this.pendingModeId,
+        bots: this.pendingBots,
+        seed: 0x51e161,
+        hostName: 'Host',
+      });
+      this.room = room;
+      const session = NetSession.attachTo(room.host, this.opts.skinId, this.opts.link);
+      this.session = session;
+      this.netStarted = false;
+      this.world = session.world;
+
+      await this.showNextInvite();
+    } catch (e) {
+      this.failOnline(e);
+    }
+  }
+
+  /**
+   * Show an invite, then scan for the reply.
+   *
+   * One invite per joiner: an offer is specific to the peer that answers it, so a host
+   * expecting three friends shows three codes in turn. `showNextInvite` is therefore
+   * called again after each successful connection rather than once.
+   */
+  private async showNextInvite(): Promise<void> {
+    const room = this.room;
+    if (!room) return;
+    this.qrInvite?.cancel();
+    const invite = await createQrInvite(room.host, 'Host');
+    this.qrInvite = invite;
+
+    this.qrDisplay.render(buildQr(invite.payload));
+    this.lobby.showQr({
+      title: 'Show this to your friend',
+      instruction: 'They tap “Scan a code” and point their camera at this.',
+      canvas: this.qrDisplay.canvas,
+      note: 'Then they will show you a code to scan back.',
+      next: { label: 'Scan their reply', onClick: () => void this.scanReply() },
+    });
+    this.lobby.show();
+  }
+
+  /** Host: read the joiner's reply code and finish the connection. */
+  private async scanReply(): Promise<void> {
+    const invite = this.qrInvite;
+    if (!invite) return;
+    const why = QrScanner.unavailableReason();
+    if (why) {
+      this.lobby.setStatus({ kind: 'failed', reason: why });
+      return;
+    }
+
+    this.lobby.showScanner({
+      title: 'Scan their reply',
+      instruction: 'Point at the code on their screen.',
+      video: this.qrScanner.video,
+    });
+    try {
+      await this.qrScanner.start((payload) => {
+        void invite
+          .accept(payload)
+          .then(() => {
+            // Straight into showing the next invite, so adding a third player is one tap
+            // rather than a trip back through the menu.
+            this.showHostQrConnected();
+          })
+          .catch((e: unknown) => this.lobby.setStatus({ kind: 'failed', reason: describeError(e) }));
+      });
+    } catch (e) {
+      this.lobby.setStatus({ kind: 'failed', reason: describeError(e) });
+    }
+  }
+
+  private showHostQrConnected(): void {
+    this.qrInvite = null;
+    this.lobby.showQrHostConnected(this.room?.peerCount ?? 0, this.onlineRoster(), {
+      onAnother: () => void this.showNextInvite(),
+      onStart: () => this.startHostedMatch(),
+    });
+    this.lobby.show();
+  }
+
+  /** Join by scanning a host's code, then showing a reply. */
+  private async joinViaQr(): Promise<void> {
+    if (!this.ensureQrSupported()) return;
+    const why = QrScanner.unavailableReason();
+    if (why) {
+      this.lobby.setStatus({ kind: 'failed', reason: why });
+      return;
+    }
+    this.teardownOnline();
+
+    this.lobby.showScanner({
+      title: 'Scan the host’s code',
+      instruction: 'Point at the code on their screen.',
+      video: this.qrScanner.video,
+    });
+    try {
+      await this.qrScanner.start((payload) => void this.afterScanningInvite(payload));
+    } catch (e) {
+      this.lobby.setStatus({ kind: 'failed', reason: describeError(e) });
+    }
+  }
+
+  private async afterScanningInvite(payload: Uint8Array): Promise<void> {
+    try {
+      const reply = await replyToQrInvite(payload);
+      this.qrDisplay.render(buildQr(reply.payload));
+      this.lobby.showQr({
+        title: 'Show this back',
+        instruction: `Hold this up for ${reply.hostName} to scan.`,
+        canvas: this.qrDisplay.canvas,
+        note: 'The match starts on its own once they have scanned it.',
+      });
+      this.lobby.show();
+
+      // No handshake message says "they scanned it" -- the channels opening is the first
+      // evidence, which is what `connect` waits for.
+      const client = await reply.connect(this.opts.skinId, 'Player');
+      this.guest = { client, close: () => reply.cancel() };
+      const session = NetSession.fromClient(client);
+      this.session = session;
+      this.world = session.world;
+      this.netStarted = true;
+      this.lobby.hide();
+      this.showHint('Connected. Waiting for the host to start.', 5);
+    } catch (e) {
+      this.failOnline(e);
+    }
+  }
+
+  private ensureQrSupported(): boolean {
+    if (qrSupported()) return true;
+    this.lobby.setStatus({
+      kind: 'failed',
+      reason: 'This browser cannot compress the invite. Try Chrome or a recent Safari.',
+    });
+    this.lobby.show();
+    return false;
+  }
+
   /** Host only: begin the match everybody is waiting in the lobby for. */
   private startHostedMatch(): void {
     if (!this.room || !this.session) return;
@@ -386,6 +551,9 @@ export class Game {
    * something to say.
    */
   private teardownOnline(): void {
+    this.qrScanner.stop();
+    this.qrInvite?.cancel();
+    this.qrInvite = null;
     this.room?.close();
     this.room = null;
     this.guest?.close();

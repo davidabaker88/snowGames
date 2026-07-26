@@ -52,6 +52,17 @@ interface RtcBridge {
     iceState: string;
   };
   pump(ms: number): Promise<void>;
+  qrInvitePixels(modeId: string, bots: number): Promise<Pixels>;
+  qrReplyPixels(pix: Pixels): Promise<Pixels>;
+  qrAcceptReply(pix: Pixels): Promise<void>;
+  qrFinishJoin(): Promise<void>;
+}
+
+/** A rendered code, as a camera would deliver it. */
+interface Pixels {
+  data: number[];
+  width: number;
+  height: number;
 }
 
 declare global {
@@ -174,6 +185,84 @@ async function main(): Promise<void> {
 
     await hostCtx.close();
     await joinCtx.close();
+
+    // ---- the same thing again, with NO signalling server at all -------------
+    //
+    // This is the path that needs no account, no deploy and no internet: the host renders
+    // its offer as a QR code, the joiner's camera reads it, the joiner renders its answer,
+    // and the host's camera reads that. Here the "cameras" are this process moving pixel
+    // arrays between two pages -- the only part that is stubbed, and the part that is
+    // ordinary hardware.
+    console.log('\n=== QR signalling, no server ===');
+    const qrHostCtx = await browser.newContext({ viewport: { width: 900, height: 500 } });
+    const qrJoinCtx = await browser.newContext({ viewport: { width: 900, height: 500 } });
+    const qrHost = await qrHostCtx.newPage();
+    const qrJoin = await qrJoinCtx.newPage();
+    const qrErrs: string[] = [];
+    for (const [label, pg] of [
+      ['qr-host', qrHost],
+      ['qr-join', qrJoin],
+    ] as const) {
+      pg.on('pageerror', (e) => qrErrs.push(`${label}: ${String(e)}`));
+      pg.on('console', (m) => {
+        if (m.type() === 'error') qrErrs.push(`${label}: ${m.text()}`);
+      });
+    }
+    await qrHost.goto(`${base}/?dev=rtc`, { waitUntil: 'networkidle' });
+    await qrJoin.goto(`${base}/?dev=rtc`, { waitUntil: 'networkidle' });
+    await qrHost.waitForFunction(() => '__rtc' in window, { timeout: 15000 });
+    await qrJoin.waitForFunction(() => '__rtc' in window, { timeout: 15000 });
+
+    const invitePix = await qrHost.evaluate(() => window.__rtc.qrInvitePixels('teamWar', 2));
+    check(
+      'the host rendered an invite code',
+      invitePix.width > 0 && invitePix.data.length === invitePix.width * invitePix.height * 4,
+      `${invitePix.width}x${invitePix.height}px at 2px per module`,
+    );
+
+    const replyPix = await qrJoin.evaluate((p) => window.__rtc.qrReplyPixels(p), invitePix);
+    check(
+      'the joiner read the invite and rendered a reply',
+      replyPix.width > 0,
+      `${replyPix.width}x${replyPix.height}px`,
+    );
+
+    await qrHost.evaluate((p) => window.__rtc.qrAcceptReply(p), replyPix);
+    await qrJoin.evaluate(() => window.__rtc.qrFinishJoin());
+    check('the host read the reply and the channels opened', true);
+
+    let qrJoined = false;
+    for (let i = 0; i < 60 && !qrJoined; i++) {
+      await Promise.all([
+        qrHost.evaluate(() => window.__rtc.pump(100)),
+        qrJoin.evaluate(() => window.__rtc.pump(100)),
+      ]);
+      qrJoined = (await qrJoin.evaluate(() => window.__rtc.joinState())).joined;
+    }
+    const qjs0 = await qrJoin.evaluate(() => window.__rtc.joinState());
+    check('the client joined with no signalling server', qrJoined, `ice ${qjs0.iceState}`);
+    check('the joiner got a player slot', qjs0.playerId === 0, `player ${qjs0.playerId}`);
+
+    for (let i = 0; i < 30; i++) {
+      await Promise.all([
+        qrHost.evaluate(() => window.__rtc.pump(100)),
+        qrJoin.evaluate(() => window.__rtc.pump(100)),
+      ]);
+    }
+    const qhs = await qrHost.evaluate(() => window.__rtc.hostState());
+    const qjs = await qrJoin.evaluate(() => window.__rtc.joinState());
+    check('a match is running over the QR-negotiated connection', qhs.tick > 60, `tick ${qhs.tick}`);
+    check(
+      'snapshots are reaching the joiner',
+      qjs.confirmedTick > 40,
+      `confirmed ${qjs.confirmedTick} against host ${qhs.tick}`,
+    );
+    check('bots joined', qhs.players === 3, `${qhs.players} players`);
+    check('neither QR page reported an error', qrErrs.length === 0, qrErrs.slice(0, 3).join(' | '));
+
+    await qrHost.screenshot({ path: `${OUT}/26-qr-host.png` });
+    await qrHostCtx.close();
+    await qrJoinCtx.close();
   } finally {
     await browser.close();
     await server.close();

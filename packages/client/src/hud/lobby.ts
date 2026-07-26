@@ -19,6 +19,10 @@ export interface LobbyHandlers {
   onCancel(): void;
   /** Host only: everybody is in, start playing. */
   onStart(): void;
+  /** Show a code for somebody to scan. Needs no server. */
+  onHostQr(): void;
+  /** Scan somebody's code. Needs no server. */
+  onJoinQr(): void;
 }
 
 export class Lobby {
@@ -80,6 +84,9 @@ export class Lobby {
     input.setAttribute('aria-label', 'Room code');
 
     const joinBtn = button('Join', 'lobby-secondary');
+    // A stable handle. Three buttons on this screen share `.lobby-secondary` because they
+    // share a look, so class is not an identity -- `data-action` is.
+    joinBtn.dataset['action'] = 'join-code';
     joinBtn.type = 'submit';
     joinBtn.disabled = true;
 
@@ -102,9 +109,126 @@ export class Lobby {
     form.appendChild(joinBtn);
     this.card.appendChild(form);
 
+    this.card.appendChild(divider('no internet needed'));
+
+    // The QR path. Listed second because typing four characters is less faff per player
+    // than two scans -- but it is the one that needs nothing set up at all, which is why
+    // it says so on the button.
+    const qrRow = document.createElement('div');
+    qrRow.className = 'lobby-qr-row';
+    const hostQr = button('Show a code', 'lobby-secondary');
+    hostQr.dataset['action'] = 'host-qr';
+    hostQr.addEventListener('click', () => this.handlers.onHostQr());
+    const joinQr = button('Scan a code', 'lobby-secondary');
+    joinQr.dataset['action'] = 'join-qr';
+    joinQr.addEventListener('click', () => this.handlers.onJoinQr());
+    qrRow.appendChild(hostQr);
+    qrRow.appendChild(joinQr);
+    this.card.appendChild(qrRow);
+
     const back = button('Play on this device instead', 'lobby-quiet');
     back.addEventListener('click', () => this.handlers.onCancel());
     this.card.appendChild(back);
+  }
+
+  /**
+   * Show a code, with an instruction and an optional next step.
+   *
+   * The instruction is a full sentence rather than a label, because a person holding up a
+   * phone with a QR code on it needs to be told what happens next -- "Invite" on its own
+   * leaves both people waiting for the other one to do something.
+   */
+  showQr(opts: {
+    title: string;
+    instruction: string;
+    canvas: HTMLCanvasElement;
+    next?: { label: string; onClick(): void };
+    note?: string;
+  }): void {
+    this.card.replaceChildren();
+    this.card.appendChild(h1(opts.title));
+    this.card.appendChild(sub(opts.instruction));
+
+    const holder = document.createElement('div');
+    holder.className = 'qr-holder';
+    holder.appendChild(opts.canvas);
+    this.card.appendChild(holder);
+
+    if (opts.note) this.card.appendChild(sub(opts.note));
+    if (opts.next) {
+      const b = button(opts.next.label, 'lobby-primary');
+      b.dataset['action'] = 'qr-next';
+      b.addEventListener('click', opts.next.onClick);
+      this.card.appendChild(b);
+    }
+    const cancel = button('Cancel', 'lobby-quiet');
+    cancel.addEventListener('click', () => this.handlers.onCancel());
+    this.card.appendChild(cancel);
+  }
+
+  /** Show the camera, pointed at somebody else's screen. */
+  showScanner(opts: { title: string; instruction: string; video: HTMLVideoElement }): void {
+    this.card.replaceChildren();
+    this.card.appendChild(h1(opts.title));
+    this.card.appendChild(sub(opts.instruction));
+
+    const holder = document.createElement('div');
+    holder.className = 'qr-holder qr-holder-video';
+    holder.appendChild(opts.video);
+    // A frame to aim with. Without it people hold the phone too far back and the code
+    // never fills enough of the sensor to resolve.
+    const reticle = document.createElement('div');
+    reticle.className = 'qr-reticle';
+    holder.appendChild(reticle);
+    this.card.appendChild(holder);
+
+    const cancel = button('Cancel', 'lobby-quiet');
+    cancel.addEventListener('click', () => this.handlers.onCancel());
+    this.card.appendChild(cancel);
+  }
+
+  /**
+   * Host side, after a QR join succeeds.
+   *
+   * A separate screen from `showHosting` because there is no room code in this path, and
+   * `showHosting` exists to display one -- passing it an empty string produced a heading
+   * that read "Your room code" above nothing.
+   */
+  showQrHostConnected(
+    peers: number,
+    roster: string[],
+    actions: { onAnother(): void; onStart(): void },
+  ): void {
+    this.card.replaceChildren();
+    this.card.appendChild(h1(peers === 1 ? '1 player connected' : `${peers} players connected`));
+    this.card.appendChild(
+      sub('Add another by showing a new code, or start the match now.'),
+    );
+
+    if (roster.length > 0) {
+      const list = document.createElement('ul');
+      list.className = 'lobby-roster';
+      for (const name of roster) {
+        const li = document.createElement('li');
+        li.textContent = name;
+        list.appendChild(li);
+      }
+      this.card.appendChild(list);
+    }
+
+    const start = button('Start the match', 'lobby-primary');
+    start.dataset['action'] = 'qr-start';
+    start.addEventListener('click', actions.onStart);
+    this.card.appendChild(start);
+
+    const another = button('Add another player', 'lobby-secondary');
+    another.dataset['action'] = 'qr-another';
+    another.addEventListener('click', actions.onAnother);
+    this.card.appendChild(another);
+
+    const cancel = button('Close', 'lobby-quiet');
+    cancel.addEventListener('click', () => this.handlers.onCancel());
+    this.card.appendChild(cancel);
   }
 
   /** Report progress, or the room code once we have one. */

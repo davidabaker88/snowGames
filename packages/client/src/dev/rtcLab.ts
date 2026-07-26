@@ -25,6 +25,8 @@ import {
 } from '@snow/shared';
 import { createInputFrame } from '@snow/shared';
 import { WebRtcTransport } from '../net/webrtcTransport.js';
+import { buildQr, drawQr, scanQr } from '../net/qrCodec.js';
+import { createQrInvite, replyToQrInvite, type QrJoinReply } from '../net/qrRoom.js';
 
 interface HostState {
   tick: number;
@@ -62,6 +64,35 @@ export function startRtcLab(canvas: HTMLCanvasElement): void {
   let joinTransport: WebRtcTransport | null = null;
   let started = false;
   const frame = createInputFrame();
+  let qrInvite: Awaited<ReturnType<typeof createQrInvite>> | null = null;
+  let qrReply: QrJoinReply | null = null;
+
+  /**
+   * Render a payload to a QR and return its pixels.
+   *
+   * The harness moves these pixels between pages, standing in for a camera pointed at
+   * another phone's screen. Two pixels per module is deliberately mean -- it is below
+   * what a phone displays, so passing here means real headroom.
+   */
+  const renderPayload = (payload: Uint8Array): { data: number[]; width: number; height: number } => {
+    const m = buildQr(payload);
+    const px = (m.size + 8) * 2;
+    const cv = document.createElement('canvas');
+    cv.width = px;
+    cv.height = px;
+    const cx = cv.getContext('2d')!;
+    cx.fillStyle = '#fff';
+    cx.fillRect(0, 0, px, px);
+    drawQr(cx, m, px);
+    const img = cx.getImageData(0, 0, px, px);
+    return { data: Array.from(img.data), width: px, height: px };
+  };
+
+  const readPixels = (pix: { data: number[]; width: number; height: number }): Uint8Array => {
+    const found = scanQr(new Uint8ClampedArray(pix.data), pix.width, pix.height);
+    if (!found) throw new Error('could not read that code');
+    return found;
+  };
 
   const bridge = {
     async hostOpen(modeId: string, bots: number): Promise<void> {
@@ -123,8 +154,36 @@ export function startRtcLab(canvas: HTMLCanvasElement): void {
         heldBall: client ? (client.world.players[client.playerId]?.heldBall ?? -1) : -1,
         bytesIn: d?.bytesIn ?? 0,
         bytesOut: d?.bytesOut ?? 0,
-        iceState: joinTransport?.pc.iceConnectionState ?? 'none',
+        // The QR path owns its transport inside `qrRoom`, so ask whichever end exists.
+        iceState: qrReply?.iceState() ?? joinTransport?.pc.iceConnectionState ?? 'none',
       };
+    },
+
+    // ---- QR signalling: no server anywhere in this path -------------------
+
+    /** Host: make an invite and hand back its pixels, as a camera would see them. */
+    async qrInvitePixels(modeId: string, bots: number) {
+      if (!host) await bridge.hostOpen(modeId, bots);
+      qrInvite = await createQrInvite(host!, 'Host');
+      return renderPayload(qrInvite.payload);
+    },
+
+    /** Joiner: read an invite from pixels, reply, hand back the reply's pixels. */
+    async qrReplyPixels(pix: { data: number[]; width: number; height: number }) {
+      qrReply = await replyToQrInvite(readPixels(pix));
+      return renderPayload(qrReply.payload);
+    },
+
+    /** Host: read the reply from pixels and complete the connection. */
+    async qrAcceptReply(pix: { data: number[]; width: number; height: number }): Promise<void> {
+      if (!qrInvite) throw new Error('no invite outstanding');
+      await qrInvite.accept(readPixels(pix));
+    },
+
+    /** Joiner: finish, once the host has scanned the reply. */
+    async qrFinishJoin(): Promise<void> {
+      if (!qrReply) throw new Error('no reply outstanding');
+      client = await qrReply.connect('stick', 'Joiner');
     },
 
     /**

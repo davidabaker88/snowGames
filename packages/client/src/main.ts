@@ -3,6 +3,7 @@ import { DEFAULT_SKIN_ID, isModeId, skinIds, type ModeId } from '@snow/shared';
 import { Game } from './game.js';
 import { startRigLab } from './dev/rigLab.js';
 import { startRtcLab } from './dev/rtcLab.js';
+import { startQrLab } from './dev/qrLab.js';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('game') as HTMLCanvasElement | null;
@@ -13,6 +14,9 @@ if (!canvas) throw new Error('#game canvas missing');
 // how the chicken skin was validated without engine changes.
 if (params.get('dev') === 'rig') {
   startRigLab(canvas, params.get('skin') ?? DEFAULT_SKIN_ID);
+} else if (params.get('dev') === 'qr') {
+  // The QR lab: measures whether a real WebRTC description fits in a scannable code.
+  startQrLab(canvas);
 } else if (params.get('dev') === 'rtc') {
   // The WebRTC lab: a page that can be either end of a peer connection, driven from
   // outside. See dev/rtcLab.ts and tools/verifyWebrtc.ts.

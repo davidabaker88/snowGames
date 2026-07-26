@@ -130,6 +130,10 @@ async function run(): Promise<void> {
   const browser: Browser = await chromium.launch({
     executablePath: '/opt/pw-browsers/chromium',
     headless: !HEADED,
+    // A synthetic camera, so the QR scanner's plumbing can be exercised without
+    // hardware. It shows a rolling test pattern rather than a code, which is exactly
+    // what is wanted here: the check is that the camera opens, not that it decodes.
+    args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
   });
 
   try {
@@ -717,6 +721,10 @@ async function run(): Promise<void> {
       deviceScaleFactor: 2,
       hasTouch: true,
       isMobile: true,
+      // Granted so the "Scan a code" path can actually open a camera view. The browser
+      // is launched with a synthetic capture device, so this exercises the plumbing
+      // without hardware.
+      permissions: ['camera'],
     });
     const lobbyPage = await lobbyCtx.newPage();
     const lobbyErrs: string[] = [];
@@ -742,14 +750,14 @@ async function run(): Promise<void> {
     await codeInput.fill('ab');
     check(
       'Join stays disabled for a short code',
-      await lobbyPage.locator('.lobby-secondary').isDisabled(),
+      await lobbyPage.locator('[data-action="join-code"]').isDisabled(),
     );
     await codeInput.fill('a-b c9');
     const typed = await codeInput.inputValue();
     check('the code field normalises as you type', typed === 'ABC9', typed);
     check(
       'Join becomes available for a valid code',
-      !(await lobbyPage.locator('.lobby-secondary').isDisabled()),
+      !(await lobbyPage.locator('[data-action="join-code"]').isDisabled()),
     );
 
     // Excluded characters are dropped, not guessed at.
@@ -774,6 +782,40 @@ async function run(): Promise<void> {
     await lobbyPage.click('.lobby-quiet >> nth=-1');
     await lobbyPage.waitForTimeout(300);
     check('you can back out to playing on this device', await lobbyPage.isVisible('.mode-select'));
+
+    // ---- the QR path, which needs no server --------------------------------
+    await lobbyPage.click('[data-action="play-together"]');
+    await lobbyPage.waitForTimeout(200);
+    check(
+      'the lobby offers the no-server QR path',
+      (await lobbyPage.isVisible('[data-action="host-qr"]')) &&
+        (await lobbyPage.isVisible('[data-action="join-qr"]')),
+    );
+
+    await lobbyPage.click('[data-action="host-qr"]');
+    await lobbyPage.waitForSelector('.qr-display', { timeout: 15000 });
+    const qrBox = await lobbyPage.locator('.qr-display').boundingBox();
+    check(
+      'hosting shows a scannable code with no signalling server',
+      qrBox !== null && qrBox.width > 120,
+      qrBox ? `${Math.round(qrBox.width)}px on screen` : 'no canvas',
+    );
+    check(
+      'and tells the host what happens next',
+      ((await lobbyPage.locator('.lobby-sub').first().textContent()) ?? '').includes('Scan a code'),
+    );
+    await lobbyPage.screenshot({ path: `${OUT}/27-qr-invite.png` });
+
+    // The reply step opens the camera.
+    await lobbyPage.click('[data-action="qr-next"]');
+    await lobbyPage.waitForSelector('.qr-video', { timeout: 15000 });
+    check('scanning the reply opens a camera view', await lobbyPage.isVisible('.qr-video'));
+    await lobbyPage.screenshot({ path: `${OUT}/28-qr-scanner.png` });
+
+    await lobbyPage.click('.lobby-quiet >> nth=-1');
+    await lobbyPage.waitForTimeout(300);
+    check('cancelling the QR flow returns to the picker', await lobbyPage.isVisible('.mode-select'));
+
     check('the lobby had no runtime errors', lobbyErrs.length === 0, lobbyErrs.slice(0, 2).join(' | '));
     await lobbyPage.close();
     await lobbyCtx.close();

@@ -440,3 +440,72 @@ body {
   outline: 2px solid #e9f1fa;
   outline-offset: 2px;
 }
+
+/* Side-by-side "Show a code" / "Scan a code". */
+.lobby-qr-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/*
+ * The code itself, and the camera view.
+ *
+ * White background on the holder rather than on the canvas alone: a QR needs a quiet
+ * margin to be findable at all, and a dark card bleeding up to the code's edge is a
+ * common reason a scan fails on the first few tries.
+ */
+.qr-holder {
+  position: relative;
+  display: grid;
+  place-items: center;
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.qr-display {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.qr-holder-video {
+  padding: 0;
+  background: #000;
+  aspect-ratio: 4 / 3;
+  max-height: 46vh;
+}
+
+.qr-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* An aiming frame. Purely to stop people standing too far back. */
+.qr-reticle {
+  position: absolute;
+  inset: 12%;
+  border: 2px solid rgb(242 166 59 / 0.9);
+  border-radius: 12px;
+  pointer-events: none;
+}
+
+/* Landscape phone: the card is short, so the code and the camera have to shrink. */
+@media (max-height: 560px) {
+  .lobby-card {
+    width: min(620px, 100%);
+    padding: 14px 16px;
+    gap: 8px;
+  }
+
+  .lobby-card h1 {
+    font-size: 19px;
+  }
+
+  .qr-holder-video {
+    max-height: 40vh;
+  }
+}

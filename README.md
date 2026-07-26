@@ -3,9 +3,11 @@
 A 3/4 top-down multiplayer snowball fight for the browser, built mobile-first.
 
 **Playable now:** five game modes, on one device against bots or across several
-devices over WebRTC. One phone hosts, shows a four-character code, and everyone else
-joins with it. Pack snowballs by circling your thumb, throw them with a flick, build
-and wreck snow walls, take the hill, steal the flag, or outlast a closing blizzard.
+devices over WebRTC. One phone hosts and everyone else joins — either with a
+four-character room code, or by **holding up a QR code and scanning it**, which needs
+no server, no account and no internet at all. Pack snowballs by circling your thumb,
+throw them with a flick, build and wreck snow walls, take the hill, steal the flag, or
+outlast a closing blizzard.
 
 ## Running it
 
@@ -35,6 +37,17 @@ If a phone can't reach the server, the usual cause is **AP isolation** — guest
 networks and many mesh routers block device-to-device traffic. Put everything on the
 main WiFi network, not the guest one.
 
+### One file, no server
+
+```bash
+pnpm build:single       # writes snowball-playtest.html
+```
+
+That is the whole game — code, styles, everything — in a single ~340 KB HTML file with
+no external requests. Send it to a phone however you like and open it. Opening it from
+storage is also a *secure context*, which the LAN dev server is not, so this is the
+build to use for the camera-based QR path below.
+
 ### URL options
 
 | URL | What it does |
@@ -51,6 +64,7 @@ main WiFi network, not the guest one.
 | `/?lat=150&loss=3` | Inject latency and packet loss, so you can *feel* a bad link |
 | `/?signal=https://…` | Point at a signalling server, overriding the built-in one |
 | `/?dev=rtc` | **WebRTC lab**: a page that can be either end of a peer connection |
+| `/?dev=qr` | **QR lab**: measures what a handshake compresses to, and re-scans it |
 
 ## Controls
 
@@ -232,6 +246,13 @@ test process acting as the signalling mailbox exactly as the Worker does. Two se
 contexts rather than two peers in one page, deliberately — same-page peers share a
 network stack and an mDNS resolver, so they connect in situations where independent
 contexts cannot, which makes them the weaker test.
+
+It runs that whole match twice: once through the signalling mailbox, and again with **no
+server in the path at all** — the host renders its offer as a real QR code, the test
+moves the resulting pixels to the other page, and that page decodes them with the same
+scanner a camera feeds. The pixels are handed over at two per module, below what any
+phone displays, so passing there means headroom rather than a lucky threshold.
+
 A test that set `packProgress = 2.5` directly would prove nothing about whether
 circling works.
 
@@ -283,6 +304,12 @@ Notable regression guards, each one written because the bug actually happened:
   ticking the moment it exists, because otherwise the handshake never completes, so
   that test is already true before the first player has joined. The symptom was a
   hosted match that ran perfectly and had no bots in it.
+- QR decoding uses a **library, not `BarcodeDetector`**. The platform API is the obvious
+  choice and is simply absent on iOS Safari — which is half the phones this is for — so
+  the built-in would have worked in every test here and on none of the target hardware.
+- The handshake goes into the code as **raw bytes**, not base64. Byte mode takes
+  arbitrary octets directly; base64-ing them first inflates the payload by a third and
+  pushed the code two versions denser for no reason at all.
 - A room code the player misread is **rejected, not guessed at**. Folding `0` onto `Q`
   is tempting, but `0` resembles `O`, `Q` and `D` about equally and silently joining
   the wrong match is worse than being told the code is wrong. The real fix is upstream:
@@ -296,6 +323,7 @@ Notable regression guards, each one written because the bug actually happened:
 | 5 | Pluggable game-mode framework + the four game modes + bots | **done** |
 | 6 | Authoritative netcode: host, prediction, interpolation, lag compensation | **done** |
 | 7 | WebRTC transport, signalling, room codes — one phone hosts for the others | **done** |
+| 7b | QR-code signalling — cross-device play with no server, account or internet | **done** |
 | — | Bluetooth, accounts, ranked play, spectator streams | not planned |
 
 ## Playing across devices
@@ -316,12 +344,48 @@ Everything above the transport was already written and tested against
 createLocalPair()   ->   a WebRTC DataChannel pair
 ```
 
-### Setting up the signalling server
-
 Two peers cannot use each other to exchange the descriptions they need in order to
-reach each other, so something has to carry a few hundred bytes each way at join time.
-That is all the signalling server does — it never sees an input, a snapshot, or
-anything about the game.
+reach each other, so something has to carry a few hundred bytes each way at join
+time. There are two ways to move those bytes, and the lobby offers both.
+
+### Option 1 — QR codes: nothing to set up
+
+Tap **Show a code** and the host displays its half of the handshake as a QR code. The
+joiner taps **Scan a code**, points their camera at it, and their phone shows a reply
+code for the host to scan back. Two scans, and the phones are talking directly for the
+rest of the match. Repeat per extra player.
+
+No account, no deploy, no server, no internet — the bytes travel as light between two
+screens. That is the whole appeal: the fastest possible path from "here is a file" to
+"we are playing", with nothing to sign up for.
+
+It fits because the handshake is *small*. A description is ~560 bytes; `deflate-raw`
+gets it to ~455 — SDP is very repetitive text — and the code is written in QR **byte
+mode**, so those bytes go in directly rather than paying base64's 33% surcharge.
+Measured end to end: the invite lands at version 14 (73×73 modules) and the reply at
+version 13 (69×69), both at error-correction level M, and both decode correctly down to
+**one screen pixel per module**. A phone displays several, so there is real headroom.
+The level picks itself: M while it fits inside a density a camera handles comfortably,
+dropping to L above that, because a denser code the camera can barely find is worse than
+a slightly less redundant one it locks onto first time.
+
+**The camera needs a secure page.** This is the one gotcha, and it is a browser rule
+rather than anything here: `getUserMedia` is refused on a plain `http://192.168.x.x`
+address. Opening the single-file build straight off the phone's storage (`file://`) is
+a secure context and works; so does any `https://` page. A LAN dev server is not, so
+`pnpm dev` on a phone can *show* a code but not scan one. The lobby says which of
+those you are in rather than failing silently.
+
+Trade-off worth naming: a QR handshake is point-to-point and face-to-face. There is
+no mailbox to leave a code in, so nobody can join a match already in progress, and
+everybody has to be in the same room. That is exactly what option 2 is for.
+
+### Option 2 — room codes, via a signalling server
+
+Tap **Host a game** and the host publishes a four-character code; other players type
+it in, from anywhere. This needs one thing deployed, once: a tiny mailbox that carries
+those few hundred bytes at join time. It never sees an input, a snapshot, or anything
+about the game.
 
 That distinction is what makes it free rather than expensive. A *relaying* game server
 carries every message of every match, which worked out at roughly **14 eight-player
@@ -345,8 +409,10 @@ wrangler config uses `new_sqlite_classes` for the Durable Object: that is the st
 backend available on the free plan, and the older key-value one deploys fine and then
 fails at runtime with a billing error.
 
-Leaving `VITE_SIGNAL_URL` unset is a valid configuration — the game just has no online
-mode, and says so plainly when you tap Host. Single-device play is unaffected.
+Leaving `VITE_SIGNAL_URL` unset is a valid configuration — room codes are then
+unavailable and the lobby says so plainly when you tap Host, while the QR path and
+single-device play carry on working. That combination is deliberate: the option that
+needs no setup must not be gated behind the option that does.
 
 ### Known risks, stated honestly
 
@@ -356,8 +422,13 @@ usually works on a home network and can fail where multicast is blocked — gues
 enterprise networks especially. This is the one part not proven here: the automated test
 disables mDNS because two containerised browser contexts cannot resolve each other's
 `.local` names, so **real two-device LAN play is worth testing on actual hardware
-before trusting it.** Public STUN is configured, which covers play across the internet
-and provides a fallback.
+before trusting it.** Public STUN is configured for the room-code path, which covers
+play across the internet and provides a fallback.
+
+The QR path configures **no STUN at all**, on purpose: everyone using it is in the same
+room, so host candidates are all that can help, and gathering a reflexive address would
+only make the code slower to appear. It is also the path most exposed to the mDNS
+question above, for the same reason — it is the LAN one.
 
 **No TURN server.** A relay is the one part of WebRTC that genuinely costs money at
 volume, so there is none. Connections that would need one — some symmetric NATs — will

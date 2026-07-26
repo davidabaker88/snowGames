@@ -176,9 +176,16 @@ export interface JoinRoomOptions {
   onStatus?(s: RoomStatus): void;
 }
 
+/**
+ * A joined session, however it was joined.
+ *
+ * Note there is no `transport` field. There was, and the QR path -- which owns its
+ * transport inside `qrRoom.ts` -- could only satisfy it with a cast. Nothing outside
+ * ever used it: `close()` is the entire contract a caller needs, and exposing the
+ * transport invited callers to reach past it.
+ */
 export interface JoinedRoom {
   client: NetClient;
-  transport: WebRtcTransport;
   close(): void;
 }
 
@@ -222,7 +229,6 @@ export async function joinRoom(opts: JoinRoomOptions): Promise<JoinedRoom> {
 
   return {
     client,
-    transport,
     close: (): void => {
       client.close();
       transport.close(1000, 'left');

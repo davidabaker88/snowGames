@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@snow/shared": "workspace:*"
+    "@snow/shared": "workspace:*",
+    "jsqr": "1.4.0",
+    "qrcode-generator": "2.0.4"
   },
   "devDependencies": {
     "vite": "^6.0.7"
