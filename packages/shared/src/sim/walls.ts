@@ -44,6 +44,24 @@ export interface WallGrid {
   hp: Uint16Array;
   /** Bumped on any change. Lets a renderer or netcode layer skip unchanged state. */
   version: number;
+  /**
+   * The value `version` had when each tile last changed.
+   *
+   * This is what lets the host send a joining or lagging client only the tiles it
+   * has not seen: "everything with tileVersion > what you acked". Without it the
+   * only options are resending 736 tiles every snapshot or trusting that no
+   * wall-change message is ever lost -- and the second one is not true.
+   */
+  tileVersion: Uint32Array;
+}
+
+/**
+ * Record a change to one tile. Every mutation in this file goes through here, so
+ * a new wall operation cannot forget to make itself visible to the netcode.
+ */
+export function touchTile(g: WallGrid, i: number): void {
+  g.version++;
+  g.tileVersion[i] = g.version;
 }
 
 export function createWallGrid(bounds: {
@@ -62,6 +80,7 @@ export function createWallGrid(bounds: {
     tier: new Uint8Array(cols * rows),
     hp: new Uint16Array(cols * rows),
     version: 0,
+    tileVersion: new Uint32Array(cols * rows),
   };
 }
 
@@ -161,7 +180,7 @@ export function buildAt(g: WallGrid, i: number, hpToAdd: number): number {
 
   g.tier[i] = tier;
   g.hp[i] = Math.min(nextHp, TIER_MAX_HP[tier]!);
-  g.version++;
+  touchTile(g, i);
   return tier;
 }
 
@@ -205,7 +224,7 @@ export function damageWall(
   }
 
   out.heightAfter = wallHeightAt(g, i);
-  g.version++;
+  touchTile(g, i);
   return out;
 }
 
@@ -232,15 +251,17 @@ export function fillWallRect(
       if (i < 0) continue;
       g.tier[i] = tier;
       g.hp[i] = TIER_MAX_HP[tier]!;
+      touchTile(g, i);
     }
   }
-  g.version++;
 }
 
 export function clearWalls(g: WallGrid): void {
   g.tier.fill(0);
   g.hp.fill(0);
-  g.version++;
+  // Every tile changed, so every tile has to be re-sent. Touching them all is
+  // the honest thing here even though it is a big version jump.
+  for (let i = 0; i < g.tier.length; i++) touchTile(g, i);
 }
 
 // ---------------------------------------------------------------------------

@@ -6,13 +6,19 @@
  * requirement is cheap exact serialization plus replay for prediction -- both of
  * which a generic ECS makes harder, not easier.
  *
- * Two invariants matter for netcode:
- *  - Slots are stable. A player keeps their index; a freed ball slot is reused
- *    from a free list. Indices are the wire identity.
+ * Three invariants matter for netcode:
+ *  - Slots are stable. A player keeps their index and a ball keeps its slot for
+ *    its whole life. Indices are the wire identity.
  *  - Iteration order is insertion order over plain arrays. NEVER iterate a Map
  *    or Set for anything that affects the simulation: the host's long-lived map
  *    and a client's snapshot-rebuilt map will have different orders, producing
  *    drift that is essentially untraceable.
+ *  - EVERY FIELD THE SIMULATION READS IS RECONSTRUCTIBLE FROM A SNAPSHOT. There
+ *    is no hidden bookkeeping. This is why ball allocation scans for the lowest
+ *    free slot instead of popping a LIFO free list: a free list's order depends
+ *    on the entire history of allocations, so a client that rebuilt its world
+ *    from a snapshot would allocate different ids from the host on the very next
+ *    throw, and every predicted snowball would be a mispredicted one.
  */
 
 import { MAX_BALLS, MAX_HP } from '../constants.js';
@@ -185,7 +191,6 @@ export interface World {
   bounds: WorldBounds;
   players: Player[];
   balls: Ball[];
-  freeBalls: number[];
   props: Prop[];
   walls: WallGrid;
   flags: Flag[];
@@ -294,11 +299,7 @@ export function createWorld(seed: number, bounds: WorldBounds, mode: GameMode = 
   for (let i = 0; i < MAX_PLAYERS; i++) players.push(createPlayer(i));
 
   const balls: Ball[] = [];
-  const freeBalls: number[] = [];
   for (let i = 0; i < MAX_BALLS; i++) balls.push(createBall(i));
-  // Push in reverse so the free list pops ascending ids, which keeps snapshots
-  // and debug output readable.
-  for (let i = MAX_BALLS - 1; i >= 0; i--) freeBalls.push(i);
 
   const flags: Flag[] = [];
   for (let i = 0; i < MAX_FLAGS; i++) flags.push(createFlag(i));
@@ -311,7 +312,6 @@ export function createWorld(seed: number, bounds: WorldBounds, mode: GameMode = 
     bounds,
     players,
     balls,
-    freeBalls,
     props: [],
     walls: createWallGrid(bounds),
     flags,
@@ -384,15 +384,25 @@ export function spawnPlayer(
   return null;
 }
 
+/**
+ * Take the LOWEST free ball slot.
+ *
+ * A linear scan over 160 slots, a handful of times a second, in exchange for the
+ * allocation order being a pure function of which slots are currently alive. That
+ * trade is what lets a client rebuild its world from a snapshot and still agree
+ * with the host about which slot the next snowball lands in. A LIFO free list is
+ * O(1) but its order encodes the whole allocation history, which a snapshot does
+ * not carry and could not carry cheaply.
+ */
 export function allocBall(w: World): Ball | null {
-  const id = w.freeBalls.pop();
-  if (id === undefined) return null;
-  const b = w.balls[id];
-  if (!b) return null;
-  b.alive = true;
-  b.spin = 0;
-  b.stateTick = w.tick;
-  return b;
+  for (const b of w.balls) {
+    if (b.alive) continue;
+    b.alive = true;
+    b.spin = 0;
+    b.stateTick = w.tick;
+    return b;
+  }
+  return null;
 }
 
 export function freeBall(w: World, b: Ball): void {
@@ -400,7 +410,6 @@ export function freeBall(w: World, b: Ball): void {
   b.alive = false;
   b.owner = -1;
   b.state = BallState.Grounded;
-  w.freeBalls.push(b.id);
 }
 
 export function pushEvent(

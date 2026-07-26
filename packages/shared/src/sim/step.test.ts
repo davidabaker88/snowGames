@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allocBall, createWorld, hashWorld, spawnPlayer, type World } from './world.js';
+import { allocBall, createWorld, freeBall, hashWorld, spawnPlayer, type World } from './world.js';
 import { step, type InputMap } from './step.js';
 import { ActionState, BallSize, BallState, SimEventType, TEAM_NONE } from './types.js';
 import {
@@ -9,6 +9,7 @@ import {
   type InputFrame,
 } from '../input/inputFrame.js';
 import {
+  MAX_BALLS,
   MAX_PACK_ROTATIONS_PER_SEC,
   PACK_ROTATIONS_REQUIRED,
   PICKUP_TICKS,
@@ -407,7 +408,6 @@ describe('determinism', () => {
     const w = makeWorld();
     spawnPlayer(w, { x: 500, y: 400 });
     const f = createInputFrame();
-    const before = w.freeBalls.length;
 
     for (let t = 0; t < 3000; t++) {
       f.packDelta = 0.05;
@@ -418,11 +418,38 @@ describe('determinism', () => {
       step(w, inputs({ 0: f }), { mode: 'authoritative' });
     }
 
+    // A leak shows up as the pool being exhausted: grounded balls melt, so after
+    // 100 seconds of continuous throwing the live count must be far below the cap
+    // and a fresh allocation must still succeed.
     const live = w.balls.filter((b) => b.alive).length;
-    expect(w.freeBalls.length + live).toBe(before);
-    // No duplicate ids on the free list -- a double-free would be silent
-    // corruption otherwise.
-    expect(new Set(w.freeBalls).size).toBe(w.freeBalls.length);
+    expect(live).toBeLessThan(MAX_BALLS - 8);
+    expect(allocBall(w)).not.toBeNull();
+
+    // Ids are unique by construction now (a ball owns its slot for life), so the
+    // thing worth asserting is that no slot is doubly live.
+    const ids = w.balls.filter((b) => b.alive).map((b) => b.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  /**
+   * The invariant the netcode leans on: allocation order is a pure function of
+   * which slots are alive, not of allocation history. Without it a client that
+   * rebuilt its world from a snapshot would disagree with the host about the id
+   * of the very next snowball thrown.
+   */
+  it('allocates the same ball id in two worlds with the same alive set', () => {
+    const a = makeWorld();
+    const b = makeWorld();
+
+    // Drive the two worlds to the same alive set by different routes: `a` churns
+    // through slots, `b` allocates straight up to the same count.
+    for (let i = 0; i < 12; i++) allocBall(a);
+    for (const id of [3, 7, 1]) freeBall(a, a.balls[id]!);
+    for (let i = 0; i < 12; i++) allocBall(b);
+    for (const id of [1, 3, 7]) freeBall(b, b.balls[id]!);
+
+    expect(a.balls.map((x) => x.alive)).toEqual(b.balls.map((x) => x.alive));
+    expect(allocBall(a)!.id).toBe(allocBall(b)!.id);
   });
 });
 

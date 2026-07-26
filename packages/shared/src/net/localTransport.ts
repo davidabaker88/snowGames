@@ -34,7 +34,30 @@ export interface LinkConditions {
   reorderPct?: number;
   /** Seed for the condition RNG, so a flaky-looking test is reproducible. */
   seed?: number;
+  /**
+   * Where delayed delivery is scheduled. Defaults to real timers.
+   *
+   * Injectable because a test that drives a VIRTUAL clock cannot use real ones: it
+   * would be measuring wall-clock delay against simulated time, and a link
+   * configured for 150ms would be observed as whatever the event loop happened to
+   * take. Supplying a scheduler backed by the same clock the game reads makes
+   * latency, jitter and reordering exactly reproducible instead of approximately so.
+   */
+  scheduler?: LinkScheduler;
 }
+
+/** Somewhere to put work that should happen later. */
+export interface LinkScheduler {
+  /** Run `fn` after `delayMs`. Returns a cancel function. */
+  after(delayMs: number, fn: () => void): () => void;
+}
+
+const REAL_SCHEDULER: LinkScheduler = {
+  after(delayMs, fn) {
+    const h = setTimeout(fn, delayMs);
+    return () => clearTimeout(h);
+  },
+};
 
 class LocalTransport implements Transport {
   readonly kind = 'local' as const;
@@ -55,7 +78,7 @@ class LocalTransport implements Transport {
 
   private open = false;
   private readonly rng: RngState;
-  private readonly pending = new Set<TimerHandle>();
+  private readonly pending = new Set<() => void>();
 
   constructor(
     readonly id: string,
@@ -103,7 +126,10 @@ class LocalTransport implements Transport {
   close(code = 1000, reason = ''): void {
     if (!this.open) return;
     this.open = false;
-    for (const h of this.pending) clearTimeout(h);
+    // Anything still in flight is dropped, the way a real socket drops its send
+    // queue on close. This is why the host sends a refusal and lets the CLIENT hang
+    // up rather than closing itself -- closing here would destroy the explanation.
+    for (const cancel of this.pending) cancel();
     this.pending.clear();
     this.closeEmitter.emit({ code, reason, wasClean: true });
     // Tell the far end, asynchronously, the way a real socket would.
@@ -142,11 +168,15 @@ class LocalTransport implements Transport {
   }
 
   private schedule(ms: number, fn: () => void): void {
-    const handle = setTimeout(() => {
-      this.pending.delete(handle);
+    const sched = this.cond.scheduler ?? REAL_SCHEDULER;
+    // A holder cell, so the cancel function can be removed from `pending` by
+    // identity from inside the callback it is paired with.
+    const cell: { cancel: () => void } = { cancel: () => {} };
+    cell.cancel = sched.after(ms, () => {
+      this.pending.delete(cell.cancel);
       fn();
-    }, ms);
-    this.pending.add(handle);
+    });
+    this.pending.add(cell.cancel);
   }
 }
 

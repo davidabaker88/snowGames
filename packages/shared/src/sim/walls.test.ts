@@ -426,8 +426,8 @@ describe('the build action end to end', () => {
     runTicks(w, BUILD_TICKS + 4, inputs({ 0: idle }));
 
     expect(w.balls.filter((b) => b.alive).length).toBe(aliveBefore - 1);
-    // And the slot went back to the free list rather than leaking.
-    expect(new Set(w.freeBalls).size).toBe(w.freeBalls.length);
+    // And the slot is genuinely reusable rather than leaked.
+    expect(allocBall(w)).not.toBeNull();
   });
 });
 

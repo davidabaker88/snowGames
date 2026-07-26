@@ -8,6 +8,13 @@ export * from './math/rng.js';
 export * from './net/signal.js';
 export * from './net/transport.js';
 export * from './net/localTransport.js';
+export * from './net/protocol.js';
+export * from './net/schema.js';
+export * from './net/codec.js';
+export * from './net/snapshot.js';
+export * from './net/clock.js';
+export * from './net/host.js';
+export * from './net/client.js';
 
 export * from './input/inputFrame.js';
 
