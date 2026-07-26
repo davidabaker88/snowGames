@@ -1,11 +1,18 @@
 /**
  * Composition root.
  *
- * Wires input -> simulation -> renderer. Note that the simulation is run through
- * the same `step()` the authoritative server will use, driven by the same
- * `InputFrame` a network client will send. When the real netcode lands in a later
- * phase, this file swaps a local step call for a transport and gains prediction --
- * the simulation and renderer do not change.
+ * Wires input -> simulation -> renderer, in one of two ways:
+ *
+ *  - **Direct** (the default): `step()` is called here, with bots feeding the same
+ *    input map a thumb does. No network, because single-device play does not need
+ *    one and routing it through a host would add a round trip and a class of
+ *    failure for nothing.
+ *  - **Hosted** (`?net=1`): a real `GameHost` and `NetClient` in the same tab, with
+ *    prediction, reconciliation and interpolation all live. See `net/netSession.ts`.
+ *
+ * The renderer cannot tell the difference, which is the point -- it reads a `World`
+ * either way. When the WebRTC transport lands, the hosted path becomes the only
+ * path, and the only thing that changes is how the two ends are connected.
  */
 
 import {
@@ -39,6 +46,7 @@ import {
   type InputFrame,
   type ModeHud,
   type ModeId,
+  type LinkConditions,
   type World,
 } from '@snow/shared';
 import { GameLoop, resizeCanvas } from './loop.js';
@@ -51,6 +59,8 @@ import { ParticleSystem } from './render/particles.js';
 import { drawHud, type HudModel } from './hud/hud.js';
 import { drawModeHud, drawSpectatorNotice } from './hud/modeHud.js';
 import { ModeSelect } from './hud/modeSelect.js';
+import { RateMeter, drawNetDebug, netDebugHeight } from './hud/netDebug.js';
+import { NetSession } from './net/netSession.js';
 import type { Camera, Viewport } from './render/projection.js';
 
 /** Safe-area top inset, read from the CSS variable the stylesheet publishes. */
@@ -72,10 +82,17 @@ export interface GameOptions {
   /** Mode to start in. Omit to show the picker. */
   modeId?: ModeId;
   bots?: number;
+  /** Run through a real host and net client in this tab. */
+  networked?: boolean;
+  /** Show the netcode overlay. Implies `networked`. */
+  netDebug?: boolean;
+  /** Injected latency and loss, so the netcode can be felt rather than read about. */
+  link?: LinkConditions;
 }
 
 export class Game {
   private world: World;
+
   private cam: Camera = createCamera();
   private vp: Viewport = { width: 1, height: 1 };
   private terrain: Terrain;
@@ -102,6 +119,11 @@ export class Game {
   private awaitingRestart = false;
   private currentModeId: ModeId;
   private currentBots: number;
+
+  /** Set only in hosted mode. See the file header. */
+  private session: NetSession | null = null;
+  private readonly rates = new RateMeter();
+  private netStarted = false;
 
   constructor(private readonly opts: GameOptions) {
     const canvas = opts.canvas;
@@ -149,6 +171,7 @@ export class Game {
    * world is where stale-state bugs live, and building one is cheap.
    */
   private buildMatch(modeId: ModeId, bots: number): World {
+    if (this.opts.networked) return this.buildHostedMatch(modeId, bots);
     const mode = getMode(modeId);
     const w = createWorld(0x51e161, MAP_ARENA01.bounds, mode);
     applyMap(w, MAP_ARENA01);
@@ -184,6 +207,33 @@ export class Game {
     this.awaitingRestart = false;
     this.particles = new ParticleSystem();
     return w;
+  }
+
+  /**
+   * Build a hosted match: a host and a client, joined over an in-tab transport.
+   *
+   * Returns the client's predicted world so the renderer has something immediately.
+   * The match itself does not begin until the handshake completes -- `GameHost.start`
+   * fills the spare slots with bots, so the human has to be seated first or the bots
+   * take the low slots and the local player is no longer player zero.
+   */
+  private buildHostedMatch(modeId: ModeId, bots: number): World {
+    this.session?.dispose();
+    this.netStarted = false;
+    // Bots live on the HOST in this mode. Leaving stale brains here would have them
+    // driving player ids in a world they no longer belong to.
+    this.brains = [];
+    this.session = new NetSession({
+      modeId,
+      bots,
+      skinId: this.opts.skinId,
+      seed: 0x51e161,
+      link: this.opts.link,
+    });
+    this.cameraTarget = LOCAL_PLAYER;
+    this.awaitingRestart = false;
+    this.particles = new ParticleSystem();
+    return this.session.world;
   }
 
   /** Switch modes, which means a whole new match. */
@@ -225,6 +275,7 @@ export class Game {
   }
 
   private tick(): void {
+    if (this.session) this.pumpSession();
     const me = this.me;
 
     // Checked before buildFrame, which consumes the key's edge state.
@@ -263,12 +314,32 @@ export class Game {
       inputs.set(b.playerId, botInput(this.world, b, this.inputSeq));
     }
 
-    const events = step(this.world, inputs, { mode: 'authoritative' });
+    const events = this.session
+      ? this.session.advance(frame)
+      : step(this.world, inputs, { mode: 'authoritative' });
 
     this.reactToEvents(events);
     this.updateCameraTarget();
     this.renderer.tickDecals(this.terrain);
     this.time += TICK_DT;
+  }
+
+  /**
+   * Bring a hosted match up once the client has actually joined.
+   *
+   * Split out of `tick` because it only matters for the first few frames of a hosted
+   * match, and burying a one-shot startup condition inside the per-tick path is how
+   * it ends up being checked forever.
+   */
+  private pumpSession(): void {
+    const s = this.session!;
+    // The client's world object is stable for the session's lifetime, so this is a
+    // pointer refresh rather than a copy.
+    this.world = s.world;
+    if (this.netStarted || !s.readyToStart) return;
+    s.start();
+    this.netStarted = true;
+    snapCamera(this.cam, this.me.x, this.me.y);
   }
 
   /**
@@ -451,6 +522,19 @@ export class Game {
     }
 
     if (this.opts.debug) this.drawDebug();
+
+    if (this.opts.netDebug && this.session) {
+      const d = this.session.debug;
+      this.rates.sample(performance.now(), d.bytesIn, d.bytesOut);
+      drawNetDebug(this.ctx, {
+        vp: this.vp,
+        info: d,
+        downPerSec: this.rates.downPerSec,
+        upPerSec: this.rates.upPerSec,
+        hostTick: this.session.host.world.tick,
+        clientTick: this.session.client.confirmed.tick,
+      });
+    }
   }
 
   private drawDebug(): void {
@@ -514,6 +598,19 @@ export class Game {
     ringRadius: number;
     flagStates: number[];
     zoneOwner: number;
+    /** Null when running the direct path. */
+    net: {
+      joined: boolean;
+      localPlayerId: number;
+      hostTick: number;
+      confirmedTick: number;
+      rttMs: number;
+      interpDelayMs: number;
+      snapCount: number;
+      reconcileErrorUnits: number;
+      bytesIn: number;
+      bytesOut: number;
+    } | null;
   } {
     const me = this.me;
     const target = buildTargetTile(this.world, me);
@@ -535,6 +632,20 @@ export class Game {
       ringRadius: this.world.ring.active ? this.world.ring.radius : 0,
       flagStates: this.world.flags.filter((f) => f.active).map((f) => f.state),
       zoneOwner: this.world.zones[0]?.active ? this.world.zones[0].owner : -99,
+      net: this.session
+        ? {
+            joined: this.session.client.joined,
+            localPlayerId: this.session.localPlayerId,
+            hostTick: this.session.host.world.tick,
+            confirmedTick: this.session.client.confirmed.tick,
+            rttMs: this.session.debug.rttMs,
+            interpDelayMs: this.session.debug.interpDelayMs,
+            snapCount: this.session.debug.snapCount,
+            reconcileErrorUnits: this.session.debug.reconcileErrorUnits,
+            bytesIn: this.session.debug.bytesIn,
+            bytesOut: this.session.debug.bytesOut,
+          }
+        : null,
     };
   }
 

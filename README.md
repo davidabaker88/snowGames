@@ -4,8 +4,12 @@ A 3/4 top-down multiplayer snowball fight for the browser, built mobile-first.
 
 **Playable now:** five game modes against bots — pack snowballs by circling your
 thumb, throw them with a flick, build and wreck snow walls, take the hill, steal
-the flag, or outlast a closing blizzard. Single device, no server — see
-[Roadmap](#roadmap).
+the flag, or outlast a closing blizzard.
+
+The authoritative netcode is written and tested too, and you can play against it:
+`/?netdebug=1&lat=150&loss=3` runs a real host in the same tab over a deliberately
+bad link. What is still missing is the *transport* that would carry it between two
+devices — see [Roadmap](#roadmap).
 
 ## Running it
 
@@ -46,6 +50,9 @@ main WiFi network, not the guest one.
 | `/?skin=chicken` | Play as a chicken — the swappable-model proof |
 | `/?dev=rig` | **Rig Lab**: turntable and clip scrubber for inspecting skins |
 | `/?debug` | On-screen state overlay (tick, gesture state, mode phase, scores) |
+| `/?net=1` | Play through a real host and net client in the same tab |
+| `/?netdebug=1` | The above, plus the netcode overlay |
+| `/?lat=150&loss=3` | Inject latency and packet loss, so you can *feel* a bad link |
 
 ## Controls
 
@@ -122,15 +129,17 @@ packages/
 
 `shared/` has no build step: the client resolves it straight to source through a
 Vite alias. Its `tsconfig` deliberately excludes both `DOM` and `@types/node`, so
-`window` and `process` don't even typecheck there — the cheapest possible guarantee
-that the simulation will run unchanged on an authoritative server later.
+`window` and `process` don't even typecheck there. That is what lets the simulation
+*and the authoritative host* run unchanged in a browser, under Node, or in a Web
+Worker — enforced by the compiler rather than by remembering to.
 
 Three ideas carry most of the weight:
 
 **The simulation is a pure function.** `step(world, inputs, ctx)` has no ambient
-time, no `Math.random`, no I/O. The seeded RNG lives inside world state. That's what
-makes client-side prediction possible later, and it's covered by a test that hashes
-1,200 ticks and compares runs.
+time, no `Math.random`, no I/O. The seeded RNG lives inside world state. That is what
+makes client-side prediction work — the client replays its own unacked inputs through
+the very same function the host used — and it's covered by a test that hashes 1,200
+ticks and compares runs.
 
 **Characters are a procedural skeleton driven by data.** A "skin" is a bone
 hierarchy plus a `RoleMap`. Animation clips target *roles* (`throwLimb`, `leg.0`),
@@ -203,8 +212,15 @@ pnpm verify        # drives the real game in headless Chromium, writes screensho
 `pnpm verify` is the interesting one: it launches Chromium, dispatches real
 `PointerEvent`s through the actual gesture recognizer, and asserts the game
 responds — packing, throwing, placing, picking up, hitting a dummy, building a wall,
-chipping one down, swapping skins, booting every game mode, and playing a bot match
-through to a winner.
+chipping one down, swapping skins, booting every game mode, playing a bot match
+through to a winner, and doing all of it again through the authoritative host over a
+90ms link with 2% packet loss.
+
+The netcode also has its own in-process suite: a real host and eight real clients in
+one process, playing every mode to completion, first on a clean link and then at
+150ms latency, 40ms jitter, 3% loss and 1% reorder — asserting a valid winner, that
+every client converges tick-for-tick with the host, and that traffic stays inside
+8 KB/s down and 1.2 KB/s up per player.
 A test that set `packProgress = 2.5` directly would prove nothing about whether
 circling works.
 
@@ -229,6 +245,25 @@ Notable regression guards, each one written because the bug actually happened:
 - Canvas `rotate(t)` maps local +y to `(-sin t, cos t)`, so bone rotation needs
   `atan2(-dx, dy)`. The other sign draws every bone backwards from its own origin,
   which looks like a character turned inside out rather than like a sign error.
+- The host needs an **input jitter buffer**. Client and host both run at exactly
+  30Hz, so with no cushion the slightest jitter leaves the host with nothing to apply
+  and it substitutes a frame the client cannot know about. That one effect dominated
+  prediction error: 2.3 units at p90, against 0.1 with two frames of buffer.
+- Interpolation delay is tuned from measured **snapshot age**, not from jitter.
+  Jitter is one term; latency and snapshot cadence are the others. Tuning on jitter
+  alone had the client rendering ahead of its own buffer, extrapolating every frame,
+  and remote players advancing in 28-unit lurches.
+- A "full" snapshot lists only what exists, so it has to **wipe first** or anything
+  the client still holds and the host has forgotten survives as an unkillable ghost.
+- Inactive entity slots are **canonically zero on the wire**. Left as whatever
+  happened to be in the struct, they differ between host and client, and a delta
+  reports them as changed on every snapshot for the whole match.
+- `actionTicks` **saturates** on the wire. It increments forever on an idle player,
+  so without a ceiling every player differs from every baseline every snapshot and
+  delta compression achieves precisely nothing.
+- A lost Welcome used to strand a client permanently: the host had already marked it
+  joined, so every retried Hello was ignored while snapshots it could not use
+  streamed past. Hello is answered idempotently now.
 
 ## Roadmap
 
@@ -236,22 +271,68 @@ Notable regression guards, each one written because the bug actually happened:
 | --- | --- | --- |
 | 4 | Snow walls: build and destroy | **done** |
 | 5 | Pluggable game-mode framework + the four game modes + bots | **done** |
-| — | Networked multiplayer and a game server | **not being built** |
+| 6 | Authoritative netcode: host, prediction, interpolation, lag compensation | **done** |
+| 7 | WebRTC transport + signalling, so one phone can host for the others | next |
 
-**No server.** That is a deliberate decision, not an omission. It means there is no
-networked multiplayer: no online play, and no same-WiFi play between devices. Each
-device runs its own game.
+### Where multiplayer is heading
 
-What that does *not* rule out is same-device play against bots, which is what all
-five modes above run on. The groundwork for networking is here anyway: `step()` is a
-pure function a host could drive, bots already emit the same `InputFrame` structs a
-human does, and `shared/net/localTransport.ts` carries messages in-process with
-configurable latency and loss.
+A browser **cannot listen on a TCP port** — there is no server-socket API in
+JavaScript, on any platform. So a phone can never be the thing others type a URL into.
+What a phone browser *can* do is run the authoritative simulation with everyone else
+attached over **WebRTC DataChannels**, which connect peer-to-peer with neither side
+listening. That is the plan: the page comes from static hosting, the *game* runs on
+whichever phone tapped "host".
 
-If networking is ever wanted, nothing here blocks it. `Transport` is bytes-only and
-assumes nothing about ordering or reliability, so a WebSocket server — or WebRTC, or
-a native Bluetooth bridge behind a Capacitor wrapper — would be a new file rather
-than a rewrite.
+Phase 6 is the part that had to come first, and it is done. The only thing Phase 7
+changes is how two ends are connected:
+
+```
+createLocalPair()   ->   a WebRTC DataChannel pair
+```
+
+Everything above that line — the host, the codecs, prediction, reconciliation,
+interpolation, lag compensation — is already written and tested, and does not care.
+
+### The netcode
+
+Run `/?netdebug=1&lat=150&loss=3` and you are playing against a real authoritative
+host over a link with 150ms of latency and 3% packet loss. It is in the same tab, but
+nothing about it is a mock: those are the real codecs and the real prediction path.
+
+Four decisions carry it.
+
+**The host is not a server.** It ships in every player's bundle, because whoever taps
+"host" runs it. So it lives in `shared/`, where the tsconfig supplies neither DOM nor
+`node:*` — which means host portability is enforced by the compiler rather than by
+good intentions. The same file runs in a browser, under Node for the tests, and would
+run behind a WebSocket unchanged.
+
+**Deltas are encoded against what a client acknowledged, never against what was last
+sent.** Sent is not received. When a snapshot is lost the client keeps acknowledging
+its older tick, the host keeps encoding from that baseline, and the missing state is
+naturally included again — so loss recovery needs no retransmit logic, no nacks, and
+costs exactly one extra delta.
+
+**Prediction is deliberately narrow.** The client predicts its own movement and its
+own action state, and nothing else — not damage, not deaths, not pickups, not scores,
+not anybody else's position. That is what keeps drift small enough that bit-exact
+determinism is never required, only *structural* determinism. Hits render only from
+host events, because predicting your own hits is exactly where "why didn't my hit
+count" comes from.
+
+**Snowball lag compensation is not shooter-style rewind.** Flight time is 0.4–1.2s,
+which dwarfs any plausible latency, so rewinding the victim would produce the
+notorious *"I was clearly behind that wall and still got hit"* — and the player would
+be right, because the ball was visibly in the air for a second first. Instead the ball
+spawns where the thrower actually was when they flicked, fast-forwards through the
+time since, and then collides against where bodies are **now**. Thrower-favoured
+spawn, victim-favoured hit.
+
+One simulation change fell out of all this and is worth knowing about: ball allocation
+takes the **lowest free slot** rather than popping a free list. A free list's order
+encodes its entire allocation history, which a snapshot does not carry — so a client
+that rebuilt its world from one would disagree with the host about the very next
+snowball thrown.
 
 Cats and other creatures are a data file each: add a skin, add one line to the skin
 registry.

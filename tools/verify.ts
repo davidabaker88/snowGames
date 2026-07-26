@@ -600,6 +600,112 @@ async function run(): Promise<void> {
     check('the finished match had no errors', finishErrs.length === 0, finishErrs.slice(0, 2).join(' | '));
     await finishPage.screenshot({ path: `${OUT}/19-match-result.png` });
     await finishPage.close();
+
+    // ---- the networked path, in a real browser -----------------------------
+    console.log('\n=== Netcode in the browser ===');
+    interface NetProbe {
+      net: {
+        joined: boolean;
+        localPlayerId: number;
+        hostTick: number;
+        confirmedTick: number;
+        rttMs: number;
+        interpDelayMs: number;
+        snapCount: number;
+        reconcileErrorUnits: number;
+        bytesIn: number;
+        bytesOut: number;
+      } | null;
+      tick: number;
+      modeId: string;
+      activePlayers: number;
+      heldBall: number;
+      phase: number;
+    }
+    const netState = async (pg: Page): Promise<NetProbe> =>
+      pg.evaluate(
+        () =>
+          (window as unknown as { __snowGame: { debugState(): NetProbe } }).__snowGame.debugState(),
+      );
+
+    const netPage = await modeCtx.newPage();
+    const netErrs: string[] = [];
+    netPage.on('pageerror', (e) => netErrs.push(String(e)));
+    netPage.on('console', (m) => {
+      if (m.type() === 'error') netErrs.push(m.text());
+    });
+    // A deliberately unpleasant link, so this exercises prediction and interpolation
+    // rather than a zero-latency shortcut through them.
+    await netPage.goto(`${base}/?mode=teamWar&bots=4&netdebug=1&lat=90&loss=2&debug`, {
+      waitUntil: 'networkidle',
+    });
+    await netPage.waitForFunction(() => '__snowGame' in window, { timeout: 15000 });
+    await netPage.waitForFunction(
+      () =>
+        (
+          window as unknown as { __snowGame: { debugState(): { net: { joined: boolean } | null } } }
+        ).__snowGame.debugState().net?.joined === true,
+      { timeout: 15000 },
+    );
+    await netPage.waitForTimeout(3500);
+
+    const ns = await netState(netPage);
+    check('the client joins a host in the browser', ns.net?.joined === true, `player ${ns.net?.localPlayerId}`);
+    check('the local player takes slot 0', ns.net?.localPlayerId === 0, `${ns.net?.localPlayerId}`);
+    check(
+      'the host is simulating and the client is following it',
+      (ns.net?.hostTick ?? 0) > 30 && (ns.net?.confirmedTick ?? 0) > 20,
+      `host ${ns.net?.hostTick}, confirmed ${ns.net?.confirmedTick}`,
+    );
+    check(
+      'bots joined the hosted match',
+      ns.activePlayers === 5,
+      `${ns.activePlayers} players`,
+    );
+    check(
+      'the round trip is measured',
+      (ns.net?.rttMs ?? 0) > 120,
+      `${Math.round(ns.net?.rttMs ?? 0)}ms over a 90ms link`,
+    );
+    check(
+      'the interpolation delay adapted to the link',
+      (ns.net?.interpDelayMs ?? 0) > 100,
+      `${Math.round(ns.net?.interpDelayMs ?? 0)}ms`,
+    );
+    check(
+      'prediction is not thrashing',
+      (ns.net?.snapCount ?? 99) <= 6,
+      `${ns.net?.snapCount} snaps`,
+    );
+    await netPage.screenshot({ path: `${OUT}/20-netdebug.png` });
+
+    // Real gestures through the whole authoritative path: circling has to produce a
+    // snowball on the HOST and come back in a snapshot, not merely be predicted.
+    await netPage.evaluate(() => window.__snowInput.circle({ turns: 4, radius: 44, ms: 1500 }));
+    let netHeld = -1;
+    for (let i = 0; i < 25 && netHeld < 0; i++) {
+      await netPage.waitForTimeout(120);
+      netHeld = (await netState(netPage)).heldBall;
+    }
+    check('circling packs a snowball over the network', netHeld >= 0, `heldBall=${netHeld}`);
+    await netPage.screenshot({ path: `${OUT}/21-net-holding.png` });
+
+    await netPage.evaluate(() => window.__snowInput.flick({ dx: 170, dy: -20, ms: 60 }));
+    let netReleased = false;
+    for (let i = 0; i < 25 && !netReleased; i++) {
+      await netPage.waitForTimeout(120);
+      netReleased = (await netState(netPage)).heldBall < 0;
+    }
+    check('flicking throws it over the network', netReleased);
+
+    const after = await netState(netPage);
+    check(
+      'bandwidth stayed sane',
+      after.net !== null && after.net.bytesIn > 0 && after.net.bytesIn < 400_000,
+      `${Math.round((after.net?.bytesIn ?? 0) / 1024)} KB in over ~10s`,
+    );
+    check('the networked session had no errors', netErrs.length === 0, netErrs.slice(0, 2).join(' | '));
+    await netPage.close();
     await modeCtx.close();
 
     console.log('\n=== The swappable-skin promise ===');
